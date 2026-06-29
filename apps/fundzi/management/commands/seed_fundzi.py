@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
-from apps.fundzi.models import DynamicForm, FinancialService, FormField, ServiceContent, Workflow, WorkflowStep
+from apps.fundzi.models import DynamicForm, FinancialService, FormField, ServiceContent, Vendor, VendorService, Workflow, WorkflowStep
 
 
 # Persian titles for workflow steps. Keys stay English; only the display title is localized.
@@ -124,6 +124,7 @@ class Command(BaseCommand):
             short_description='ثبت درخواست تأمین مالی بر اساس دارایی طلای کاربر.',
             full_description='کاربر نوع، وزن و ارزش تقریبی طلای خود را اعلام می‌کند و مبلغ تأمین مالی موردنیاز را ثبت می‌کند.',
             service_type='gold_backed',
+            dashboard_section='financing',
             order=1,
             rules_config={'accepted_durations_months': [3, 6, 12, 18, 24]},
             fields=GOLD_FIELDS,
@@ -152,6 +153,7 @@ class Command(BaseCommand):
             short_description='ثبت درخواست تأمین مالی بر اساس اطلاعات و ارزش تقریبی ملک.',
             full_description='کاربر اطلاعات ملک، وضعیت سند، ارزش تقریبی و مبلغ درخواستی را ثبت می‌کند تا امکان تأمین مالی بررسی شود.',
             service_type='property_backed',
+            dashboard_section='financing',
             order=2,
             rules_config={
                 'accepted_city': 'تهران',
@@ -206,6 +208,7 @@ class Command(BaseCommand):
                 'قرارداد نهایی بدون پشتوانه دولتی و به‌صورت خصوصی بین طرفین منعقد می‌شود.'
             ),
             service_type='other',
+            dashboard_section='investment',
             order=3,
             rules_config={
                 'min_investment_amount': 100_000_000,
@@ -258,6 +261,7 @@ class Command(BaseCommand):
                 'قرارداد نهایی بدون پشتوانه دولتی و به‌صورت خصوصی بین طرفین منعقد می‌شود.'
             ),
             service_type='other',
+            dashboard_section='financing',
             order=4,
             rules_config={
                 'min_requested_amount': 100_000_000,
@@ -307,9 +311,209 @@ class Command(BaseCommand):
             )),
         ])
 
+        self.seed_vendors()
+
         self.stdout.write(self.style.SUCCESS('Fundzi seed data is ready.'))
 
-    def seed_service(self, slug, title, short_description, full_description, service_type, order, rules_config, fields, workflow_steps):
+    def seed_vendors(self):
+        # ── وندورهای غیرمالی ───────────────────────────────────────────────────
+        aria, _ = Vendor.objects.update_or_create(
+            slug='aria-business',
+            defaults={
+                'name': 'شرکت مشاوران کسب‌وکار آریا',
+                'description': 'ارائه خدمات تخصصی مشاوره کسب‌وکار، تدوین طرح توجیهی و بیزینس مدل برای کسب‌وکارهای نوپا و در حال رشد.',
+                'vendor_type': 'non_financial',
+                'is_active': True,
+                'order': 1,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='aria-business-model',
+            defaults={
+                'vendor': aria,
+                'title': 'تدوین بیزینس مدل',
+                'description': (
+                    'تیم متخصص آریا بیزینس مدل کامل شما را بر اساس متدولوژی Business Model Canvas '
+                    'تدوین می‌کند. مناسب برای متقاضیان تامین مالی جمعی و سرمایه‌گذاری خصوصی.'
+                ),
+                'category': 'business_consulting',
+                'price_display': 'از ۸ میلیون تومان',
+                'duration_display': '۵ تا ۱۰ روز کاری',
+                'tags': ['بیزینس مدل', 'BMC', 'طرح توجیهی', 'استارتاپ'],
+                'is_active': True,
+                'order': 1,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='aria-feasibility-study',
+            defaults={
+                'vendor': aria,
+                'title': 'ارزیابی و طرح توجیهی',
+                'description': (
+                    'بررسی توجیه‌پذیری اقتصادی، مالی و فنی پروژه به همراه تهیه طرح توجیهی '
+                    'قابل ارائه به سرمایه‌گذار یا موسسات مالی.'
+                ),
+                'category': 'business_consulting',
+                'price_display': 'از ۱۵ میلیون تومان',
+                'duration_display': '۷ تا ۱۴ روز کاری',
+                'tags': ['طرح توجیهی', 'ارزیابی اقتصادی', 'سرمایه‌گذاری'],
+                'is_active': True,
+                'order': 2,
+            },
+        )
+
+        pars_legal, _ = Vendor.objects.update_or_create(
+            slug='pars-legal',
+            defaults={
+                'name': 'موسسه حقوقی پارس',
+                'description': 'ارائه خدمات حقوقی تخصصی در حوزه قراردادهای تجاری، سرمایه‌گذاری و تضامین مالی.',
+                'vendor_type': 'non_financial',
+                'is_active': True,
+                'order': 2,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='pars-investment-contract',
+            defaults={
+                'vendor': pars_legal,
+                'title': 'تنظیم قرارداد سرمایه‌گذاری',
+                'description': (
+                    'تنظیم قرارداد حقوقی دقیق و جامع برای معاملات سرمایه‌گذاری خصوصی و تامین مالی، '
+                    'شامل تعریف تضامین، شرایط بازپرداخت و ضمانت‌های اجرایی.'
+                ),
+                'category': 'legal',
+                'price_display': 'از ۵ میلیون تومان',
+                'duration_display': '۳ تا ۵ روز کاری',
+                'tags': ['قرارداد', 'حقوقی', 'سرمایه‌گذاری', 'تامین مالی'],
+                'is_active': True,
+                'order': 1,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='pars-collateral-review',
+            defaults={
+                'vendor': pars_legal,
+                'title': 'بررسی حقوقی تضامین',
+                'description': (
+                    'بررسی وضعیت حقوقی و ثبتی تضامین ارائه‌شده (سند ملک، سهام، سفته و ...) '
+                    'و تأیید صحت و کفایت آن‌ها.'
+                ),
+                'category': 'legal',
+                'price_display': 'از ۳ میلیون تومان',
+                'duration_display': '۲ تا ۴ روز کاری',
+                'tags': ['تضامین', 'حقوقی', 'سند', 'رهن'],
+                'is_active': True,
+                'order': 2,
+            },
+        )
+
+        iran_credit, _ = Vendor.objects.update_or_create(
+            slug='iran-credit',
+            defaults={
+                'name': 'سرویس اعتبارسنجی ایران',
+                'description': 'ارائه گزارش اعتبارسنجی و رتبه‌بندی اعتباری افراد و کسب‌وکارها برای تصمیم‌گیری در معاملات مالی.',
+                'vendor_type': 'non_financial',
+                'is_active': True,
+                'order': 3,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='iran-credit-report',
+            defaults={
+                'vendor': iran_credit,
+                'title': 'گزارش اعتبارسنجی',
+                'description': (
+                    'گزارش جامع اعتبارسنجی شامل سابقه تسهیلات، چک‌های برگشتی، '
+                    'بدهی‌های جاری و امتیاز اعتباری فرد یا شرکت.'
+                ),
+                'category': 'credit_scoring',
+                'price_display': '۵۰۰ هزار تومان',
+                'duration_display': 'فوری (حداکثر ۲۴ ساعت)',
+                'tags': ['اعتبارسنجی', 'سابقه اعتباری', 'چک برگشتی'],
+                'is_active': True,
+                'order': 1,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='iran-credit-rating',
+            defaults={
+                'vendor': iran_credit,
+                'title': 'رتبه‌بندی اعتباری کسب‌وکار',
+                'description': (
+                    'ارزیابی و رتبه‌بندی اعتباری کسب‌وکارها بر اساس صورت‌های مالی، '
+                    'سابقه فعالیت و وضعیت بازار.'
+                ),
+                'category': 'credit_scoring',
+                'price_display': 'از ۲ میلیون تومان',
+                'duration_display': '۳ تا ۷ روز کاری',
+                'tags': ['رتبه‌بندی', 'کسب‌وکار', 'اعتبار', 'مالی'],
+                'is_active': True,
+                'order': 2,
+            },
+        )
+
+        # ── وندورهای مالی ──────────────────────────────────────────────────────
+        dongi, _ = Vendor.objects.update_or_create(
+            slug='dongi-platform',
+            defaults={
+                'name': 'سکوی تامین مالی جمعی دانگی',
+                'description': 'سکوی تامین مالی جمعی مبتنی بر قرض‌الحسنه و مشارکت برای پروژه‌های تولیدی، فناوری و خدماتی.',
+                'vendor_type': 'financial',
+                'website': 'https://dongi.ir',
+                'is_active': True,
+                'order': 10,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='dongi-crowdfunding',
+            defaults={
+                'vendor': dongi,
+                'title': 'تامین مالی جمعی پروژه',
+                'description': (
+                    'ثبت و انتشار پروژه در سکوی دانگی برای جذب سرمایه از جمع. '
+                    'متقاضی باید بیزینس مدل و طرح توجیهی ارائه دهد. '
+                    'سقف جذب سرمایه: ۵ میلیارد تومان.'
+                ),
+                'category': 'crowdfunding',
+                'price_display': '۳٪ کارمزد از مبلغ جذب‌شده',
+                'duration_display': 'کمپین ۳۰ تا ۶۰ روزه',
+                'tags': ['تامین مالی جمعی', 'کراودفاندینگ', 'پروژه', 'سرمایه‌گذاری جمعی'],
+                'is_active': True,
+                'order': 1,
+            },
+        )
+
+        hami, _ = Vendor.objects.update_or_create(
+            slug='hamisara-platform',
+            defaults={
+                'name': 'سکوی تامین مالی جمعی حامی‌سرا',
+                'description': 'سکوی تامین مالی جمعی برای پروژه‌های خلاقانه، اجتماعی و استارتاپ‌ها.',
+                'vendor_type': 'financial',
+                'website': 'https://hamisara.com',
+                'is_active': True,
+                'order': 11,
+            },
+        )
+        VendorService.objects.update_or_create(
+            slug='hamisara-crowdfunding',
+            defaults={
+                'vendor': hami,
+                'title': 'کمپین تامین مالی جمعی',
+                'description': (
+                    'راه‌اندازی کمپین تامین مالی جمعی در حامی‌سرا. '
+                    'مناسب استارتاپ‌ها و پروژه‌های خلاقانه. '
+                    'سقف ۲ میلیارد تومان. نیاز به تأیید تیم حامی‌سرا دارد.'
+                ),
+                'category': 'crowdfunding',
+                'price_display': '۵٪ کارمزد از مبلغ جذب‌شده',
+                'duration_display': 'کمپین ۲۱ تا ۴۵ روزه',
+                'tags': ['حامی‌سرا', 'کراودفاندینگ', 'استارتاپ', 'پروژه خلاقانه'],
+                'is_active': True,
+                'order': 1,
+            },
+        )
+
+    def seed_service(self, slug, title, short_description, full_description, service_type, order, rules_config, fields, workflow_steps, dashboard_section='financing'):
         service, _ = FinancialService.objects.update_or_create(
             slug=slug,
             defaults={
@@ -317,6 +521,7 @@ class Command(BaseCommand):
                 'short_description': short_description,
                 'full_description': full_description,
                 'service_type': service_type,
+                'dashboard_section': dashboard_section,
                 'order': order,
                 'is_active': True,
                 'rules_config': rules_config,
