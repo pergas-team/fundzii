@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import time
 from datetime import timedelta
@@ -9,8 +11,9 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import Group
 from django.core.exceptions import ValidationError
 from django.core.paginator import EmptyPage, Paginator
-from django.db.models import Count, Q
-from django.http import JsonResponse
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import TruncMonth
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -25,7 +28,11 @@ from apps.fundzi.models import (
     FinancingRequest,
     FormField,
     InternalNote,
+    MatchingRule,
+    MatchResult,
     Notification,
+    PartnerOffer,
+    PartnerUser,
     RequestAttachment,
     ServiceContent,
     Workflow,
@@ -1271,3 +1278,395 @@ class HealthCheckView(View):
             db_ok = False
         status = 200 if db_ok else 503
         return JsonResponse({'status': 'ok' if db_ok else 'error', 'db': db_ok}, status=status)
+
+
+# ── Phase 3.1: Partner Portal ─────────────────────────────────────────────────
+
+def api_partner_required(view_func):
+    """Require the user to be a member of an active FinancialPartner.
+
+    Attaches request.partner and request.partner_role on success.
+    """
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return JsonResponse(
+                {'errors': {'detail': 'برای انجام این عملیات باید وارد شوید.'}},
+                status=401,
+            )
+        membership = (
+            request.user.partner_memberships
+            .select_related('partner')
+            .filter(partner__is_active=True)
+            .first()
+        )
+        if not membership:
+            return JsonResponse(
+                {'errors': {'detail': 'شما عضو هیچ همکار مالی فعالی نیستید.'}},
+                status=403,
+            )
+        request.partner = membership.partner
+        request.partner_role = membership.role
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_partner_required, name='dispatch')
+class PartnerRequestListView(View):
+    """GET /api/fundzi/partner/requests/ — requests assigned to this partner."""
+
+    def get(self, request):
+        qs = (
+            FinancingRequest.objects
+            .filter(match_results__partner=request.partner, match_results__status='assigned')
+            .select_related('service', 'current_workflow_step')
+            .distinct()
+            .order_by('-submitted_at')
+        )
+        data = [
+            {
+                'id': r.id,
+                'tracking_code': r.tracking_code,
+                'service': r.service.title,
+                'current_status': r.current_status,
+                'submitted_at': r.submitted_at.isoformat(),
+                'has_offer': r.partner_offers.filter(partner=request.partner).exists(),
+            }
+            for r in qs
+        ]
+        return JsonResponse({'results': data})
+
+
+@method_decorator(api_partner_required, name='dispatch')
+class PartnerRequestDetailView(View):
+    """GET /api/fundzi/partner/requests/<id>/ — detail without user PII."""
+
+    def get(self, request, pk):
+        try:
+            r = (
+                FinancingRequest.objects
+                .filter(match_results__partner=request.partner, match_results__status='assigned')
+                .select_related('service', 'current_workflow_step')
+                .get(pk=pk)
+            )
+        except FinancingRequest.DoesNotExist:
+            return JsonResponse({'errors': {'detail': 'درخواست یافت نشد.'}}, status=404)
+
+        field_values = [
+            {'label': fv.field.label, 'value': fv.value}
+            for fv in r.field_values.select_related('field').all()
+            if fv.field.key not in ('phone_number', 'national_id', 'full_name')
+        ]
+        offers = [
+            {
+                'id': o.id,
+                'amount': str(o.amount),
+                'interest_rate': str(o.interest_rate),
+                'duration_months': o.duration_months,
+                'status': o.status,
+                'created_at': o.created_at.isoformat(),
+            }
+            for o in r.partner_offers.filter(partner=request.partner)
+        ]
+        return JsonResponse({
+            'id': r.id,
+            'tracking_code': r.tracking_code,
+            'service': r.service.title,
+            'current_status': r.current_status,
+            'submitted_at': r.submitted_at.isoformat(),
+            'field_values': field_values,
+            'offers': offers,
+        })
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_partner_required, name='dispatch')
+class PartnerOfferCreateView(View):
+    """POST /api/fundzi/partner/requests/<id>/offer/"""
+
+    def post(self, request, pk):
+        try:
+            financing_request = (
+                FinancingRequest.objects
+                .filter(match_results__partner=request.partner, match_results__status='assigned')
+                .get(pk=pk)
+            )
+        except FinancingRequest.DoesNotExist:
+            return JsonResponse({'errors': {'detail': 'درخواست یافت نشد.'}}, status=404)
+
+        payload = parse_payload(request)
+        errors = {}
+        try:
+            amount = decimal_from_payload(payload.get('amount'))
+        except Exception:
+            amount = None
+        if amount is None or amount <= 0:
+            errors['amount'] = 'مبلغ پیشنهادی الزامی و باید بزرگ‌تر از صفر باشد.'
+        try:
+            interest_rate = decimal_from_payload(payload.get('interest_rate'))
+        except Exception:
+            interest_rate = None
+        if interest_rate is None or interest_rate < 0:
+            errors['interest_rate'] = 'نرخ سود الزامی است.'
+        duration_months = payload.get('duration_months')
+        try:
+            duration_months = int(duration_months)
+            if duration_months <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors['duration_months'] = 'مدت (ماه) الزامی و باید عدد مثبت باشد.'
+        if errors:
+            return error_response(errors)
+
+        offer = PartnerOffer.objects.create(
+            request=financing_request,
+            partner=request.partner,
+            submitted_by=request.user,
+            amount=amount,
+            interest_rate=interest_rate,
+            duration_months=duration_months,
+            conditions=payload.get('conditions', ''),
+        )
+        return JsonResponse({
+            'id': offer.id,
+            'status': offer.status,
+            'detail': 'پیشنهاد با موفقیت ثبت شد.',
+        }, status=201)
+
+
+@method_decorator(api_partner_required, name='dispatch')
+class PartnerOfferListView(View):
+    """GET /api/fundzi/partner/offers/"""
+
+    def get(self, request):
+        qs = (
+            PartnerOffer.objects
+            .filter(partner=request.partner)
+            .select_related('request', 'request__service')
+            .order_by('-created_at')
+        )
+        data = [
+            {
+                'id': o.id,
+                'request_tracking_code': o.request.tracking_code,
+                'service': o.request.service.title,
+                'amount': str(o.amount),
+                'interest_rate': str(o.interest_rate),
+                'duration_months': o.duration_months,
+                'status': o.status,
+                'created_at': o.created_at.isoformat(),
+            }
+            for o in qs
+        ]
+        return JsonResponse({'results': data})
+
+
+# ── Phase 3.2: Admin Matching Views ──────────────────────────────────────────
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_staff_required, name='dispatch')
+class AdminMatchingRuleListView(View):
+    """GET /api/fundzi/admin/matching-rules/  POST to create."""
+
+    def get(self, request):
+        qs = MatchingRule.objects.select_related('partner').all()
+        data = [
+            {
+                'id': r.id,
+                'partner_id': r.partner_id,
+                'partner_name': r.partner.name,
+                'priority': r.priority,
+                'conditions': r.conditions,
+                'is_active': r.is_active,
+            }
+            for r in qs
+        ]
+        return JsonResponse({'results': data})
+
+    def post(self, request):
+        payload = parse_payload(request)
+        partner_id = payload.get('partner_id')
+        partner = get_object_or_404(FinancialPartner, pk=partner_id, is_active=True)
+        rule = MatchingRule.objects.create(
+            partner=partner,
+            priority=int(payload.get('priority', 0)),
+            conditions=payload.get('conditions', {}),
+            is_active=parse_bool(payload.get('is_active', True), default=True),
+        )
+        return JsonResponse({'id': rule.id, 'detail': 'قانون تطبیق ایجاد شد.'}, status=201)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_staff_required, name='dispatch')
+class AdminMatchingRuleDetailView(View):
+    """GET/PUT/DELETE /api/fundzi/admin/matching-rules/<id>/"""
+
+    def get(self, request, pk):
+        rule = get_object_or_404(MatchingRule.objects.select_related('partner'), pk=pk)
+        return JsonResponse({
+            'id': rule.id,
+            'partner_id': rule.partner_id,
+            'partner_name': rule.partner.name,
+            'priority': rule.priority,
+            'conditions': rule.conditions,
+            'is_active': rule.is_active,
+        })
+
+    def put(self, request, pk):
+        rule = get_object_or_404(MatchingRule, pk=pk)
+        payload = parse_payload(request)
+        if 'priority' in payload:
+            rule.priority = int(payload['priority'])
+        if 'conditions' in payload:
+            rule.conditions = payload['conditions']
+        if 'is_active' in payload:
+            rule.is_active = parse_bool(payload['is_active'])
+        rule.save()
+        return JsonResponse({'detail': 'قانون تطبیق به‌روز شد.'})
+
+    def delete(self, request, pk):
+        rule = get_object_or_404(MatchingRule, pk=pk)
+        rule.delete()
+        return JsonResponse({'detail': 'قانون حذف شد.'})
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_staff_required, name='dispatch')
+class AdminRequestMatchView(View):
+    """GET /api/fundzi/admin/requests/<id>/matches/
+    POST to run the matching engine manually.
+    """
+
+    def get(self, request, pk):
+        financing_request = get_object_or_404(FinancingRequest, pk=pk)
+        results = (
+            MatchResult.objects
+            .filter(request=financing_request)
+            .select_related('partner')
+            .order_by('-score')
+        )
+        data = [
+            {
+                'partner_id': mr.partner_id,
+                'partner_name': mr.partner.name,
+                'score': mr.score,
+                'status': mr.status,
+                'matched_at': mr.matched_at.isoformat(),
+                'assigned_at': mr.assigned_at.isoformat() if mr.assigned_at else None,
+            }
+            for mr in results
+        ]
+        return JsonResponse({'results': data})
+
+    def post(self, request, pk):
+        from apps.fundzi import matching
+        financing_request = get_object_or_404(FinancingRequest, pk=pk)
+        matches = matching.run(financing_request)
+        return JsonResponse({
+            'detail': f'{len(matches)} تطبیق یافت شد.',
+            'count': len(matches),
+        })
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_staff_required, name='dispatch')
+class AdminRequestMatchAssignView(View):
+    """POST /api/fundzi/admin/requests/<id>/matches/<partner_id>/assign/"""
+
+    def post(self, request, pk, partner_id):
+        financing_request = get_object_or_404(FinancingRequest, pk=pk)
+        match = get_object_or_404(
+            MatchResult,
+            request=financing_request,
+            partner_id=partner_id,
+        )
+        if match.status == 'assigned':
+            return JsonResponse({'detail': 'این درخواست قبلاً به همکار ارسال شده است.'})
+        match.status = 'assigned'
+        match.assigned_at = timezone.now()
+        match.save(update_fields=['status', 'assigned_at'])
+        return JsonResponse({'detail': 'درخواست با موفقیت به همکار مالی ارسال شد.'})
+
+
+# ── Phase 3.5: Reports ────────────────────────────────────────────────────────
+
+def _csv_response(filename, headers, rows):
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    response = HttpResponse(buf.getvalue(), content_type='text/csv; charset=utf-8-sig')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+@method_decorator(api_staff_required, name='dispatch')
+class AdminReportFunnelView(View):
+    """GET /api/fundzi/admin/reports/funnel/?format=csv"""
+
+    def get(self, request):
+        qs = (
+            FinancingRequest.objects
+            .values('current_status')
+            .annotate(count=Count('id'))
+            .order_by('current_status')
+        )
+        rows = [(r['current_status'] or '—', r['count']) for r in qs]
+        if request.GET.get('format') == 'csv':
+            return _csv_response('funnel.csv', ['وضعیت', 'تعداد درخواست'], rows)
+        return JsonResponse({'results': [{'status': s, 'count': c} for s, c in rows]})
+
+
+@method_decorator(api_staff_required, name='dispatch')
+class AdminReportPartnerPerformanceView(View):
+    """GET /api/fundzi/admin/reports/partner-performance/?format=csv"""
+
+    def get(self, request):
+        partners = FinancialPartner.objects.filter(is_active=True)
+        results = []
+        for p in partners:
+            assigned = MatchResult.objects.filter(partner=p, status='assigned').count()
+            offers_total = PartnerOffer.objects.filter(partner=p).count()
+            offers_accepted = PartnerOffer.objects.filter(partner=p, status='accepted').count()
+            results.append({
+                'partner_id': p.id,
+                'partner_name': p.name,
+                'assigned_requests': assigned,
+                'offers_submitted': offers_total,
+                'offers_accepted': offers_accepted,
+                'acceptance_rate': round(offers_accepted / offers_total * 100, 1) if offers_total else 0,
+            })
+        if request.GET.get('format') == 'csv':
+            headers = ['همکار', 'درخواست‌های ارسال‌شده', 'پیشنهادهای ثبت‌شده', 'پیشنهادهای پذیرفته', 'نرخ پذیرش (%)']
+            rows = [
+                (r['partner_name'], r['assigned_requests'], r['offers_submitted'], r['offers_accepted'], r['acceptance_rate'])
+                for r in results
+            ]
+            return _csv_response('partner_performance.csv', headers, rows)
+        return JsonResponse({'results': results})
+
+
+@method_decorator(api_staff_required, name='dispatch')
+class AdminReportMonthlyView(View):
+    """GET /api/fundzi/admin/reports/monthly/?format=csv"""
+
+    def get(self, request):
+        qs = (
+            FinancingRequest.objects
+            .annotate(month=TruncMonth('submitted_at'))
+            .values('month')
+            .annotate(total=Count('id'))
+            .order_by('month')
+        )
+        results = [
+            {
+                'month': r['month'].strftime('%Y-%m') if r['month'] else '—',
+                'total_requests': r['total'],
+            }
+            for r in qs
+        ]
+        if request.GET.get('format') == 'csv':
+            rows = [(r['month'], r['total_requests']) for r in results]
+            return _csv_response('monthly.csv', ['ماه', 'تعداد درخواست'], rows)
+        return JsonResponse({'results': results})
