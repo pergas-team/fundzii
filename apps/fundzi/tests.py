@@ -556,7 +556,7 @@ class ReportTests(TestCase):
 
     def test_funnel_report_csv_export(self):
         self._login()
-        response = self.client.get(reverse('fundzi-admin-report-funnel') + '?format=csv')
+        response = self.client.get(reverse('fundzi-admin-report-funnel') + '?export=csv')
         self.assertEqual(response.status_code, 200)
         self.assertIn('text/csv', response['Content-Type'])
 
@@ -574,7 +574,7 @@ class ReportTests(TestCase):
 
     def test_monthly_report_csv_export(self):
         self._login()
-        response = self.client.get(reverse('fundzi-admin-report-monthly') + '?format=csv')
+        response = self.client.get(reverse('fundzi-admin-report-monthly') + '?export=csv')
         self.assertEqual(response.status_code, 200)
         self.assertIn('text/csv', response['Content-Type'])
 

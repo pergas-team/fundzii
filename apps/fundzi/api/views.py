@@ -1,26 +1,42 @@
 import csv
 import io
-import json
 import time
 from datetime import timedelta
-from functools import wraps
 
-from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, login, logout
-from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import Group
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import Avg, Count, Q, Sum
 from django.db.models.functions import TruncMonth
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.utils.decorators import method_decorator
-from django.views import View
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET
+from rest_framework import status
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from apps.fundzi.api.permissions import IsAdminOrOperator, IsAuthenticatedJSON, IsPartnerUser, is_admin_or_operator
+from apps.fundzi.api.serializers import (
+    AdminRequestDetailSerializer,
+    AdminServiceSerializer,
+    FinancialPartnerSerializer,
+    FinancingRequestDetailSerializer,
+    FinancingRequestSerializer,
+    FormSchemaSerializer,
+    MatchingRuleSerializer,
+    MatchingRuleWriteSerializer,
+    MatchResultSerializer,
+    NotificationSerializer,
+    PartnerOfferSerializer,
+    PasswordLoginSerializer,
+    SendOtpSerializer,
+    ServiceDetailSerializer,
+    ServiceListSerializer,
+    UserAdminSerializer,
+    VerifyOtpSerializer,
+)
 from apps.fundzi.models import (
     DynamicForm,
     FinancialPartner,
@@ -32,7 +48,6 @@ from apps.fundzi.models import (
     MatchResult,
     Notification,
     PartnerOffer,
-    PartnerUser,
     RequestAttachment,
     ServiceContent,
     Workflow,
@@ -42,95 +57,9 @@ from apps.fundzi.models import (
 from apps.fundzi.services import create_financing_request
 
 
-def api_login_required(view_func):
-    """Like login_required but returns JSON 401 instead of redirecting to the
-    login page, so the SPA can detect an expired/missing session reliably."""
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
-    @wraps(view_func)
-    def wrapper(request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return JsonResponse(
-                {'errors': {'detail': 'برای انجام این عملیات باید وارد شوید.'}},
-                status=401,
-            )
-        return view_func(request, *args, **kwargs)
-
-    return wrapper
-
-
-def api_staff_required(view_func):
-    """Require an authenticated admin/operator and return JSON 401/403 instead
-    of redirecting to the login page."""
-
-    @wraps(view_func)
-    def wrapper(request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return JsonResponse(
-                {'errors': {'detail': 'برای انجام این عملیات باید وارد شوید.'}},
-                status=401,
-            )
-        if not is_admin_or_operator(request.user):
-            return JsonResponse(
-                {'errors': {'detail': 'شما به این بخش دسترسی ندارید.'}},
-                status=403,
-            )
-        return view_func(request, *args, **kwargs)
-
-    return wrapper
-
-
-def error_response(error, status=400):
-    if isinstance(error, ValidationError):
-        return JsonResponse({'errors': error.message_dict if hasattr(error, 'message_dict') else error.messages}, status=status)
-    return JsonResponse({'errors': error}, status=status)
-
-
-def parse_payload(request):
-    if request.content_type and request.content_type.startswith('application/json'):
-        body = request.body.decode('utf-8') or '{}'
-        return json.loads(body)
-    return request.POST.dict()
-
-
-def parse_bool(value, default=False):
-    if value in (None, ''):
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() in ('1', 'true', 'yes', 'on')
-
-
-def parse_json_value(value, default):
-    if value in (None, ''):
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    return json.loads(value)
-
-
-def paginate_payload(request, queryset, serializer, default_page_size=20):
-    try:
-        page = max(int(request.GET.get('page', 1)), 1)
-        page_size = min(max(int(request.GET.get('page_size', default_page_size)), 1), 100)
-    except ValueError:
-        return None, error_response({'pagination': 'پارامترهای صفحه‌بندی معتبر نیستند.'})
-    paginator = Paginator(queryset, page_size)
-    try:
-        page_obj = paginator.page(page)
-    except EmptyPage:
-        page_obj = paginator.page(paginator.num_pages or 1)
-        page = page_obj.number
-    return {
-        'results': [serializer(item) for item in page_obj.object_list],
-        'count': paginator.count,
-        'page': page,
-        'page_size': page_size,
-    }, None
-
-
-# Roles assignable from the admin panel. ``applicant`` is the implicit default.
 ROLE_CHOICES = ('admin', 'operator', 'investor', 'vendor', 'applicant')
-# Roles represented as Django groups (admin is represented via is_staff).
 ROLE_GROUPS = ('operator', 'investor', 'vendor', 'applicant')
 
 
@@ -139,7 +68,6 @@ def user_role(user):
         return 'guest'
     if user.is_superuser:
         return 'admin'
-    # Group-based roles take priority so a staff operator is not mislabeled admin.
     user_groups = {name.lower() for name in user.groups.values_list('name', flat=True)}
     if 'operator' in user_groups:
         return 'operator'
@@ -153,8 +81,6 @@ def user_role(user):
 
 
 def apply_role(user, role):
-    """Set a user's role consistently: clear role groups, then grant the new
-    role. Admin is expressed via is_staff; never auto-escalate to superuser."""
     user.groups.remove(*Group.objects.filter(name__in=ROLE_GROUPS))
     user.is_staff = role == 'admin'
     if role in ROLE_GROUPS:
@@ -165,7 +91,7 @@ def apply_role(user, role):
 
 
 def user_payload(user):
-    if not user.is_authenticated:
+    if not user or not user.is_authenticated:
         return None
     return {
         'id': user.id,
@@ -179,167 +105,801 @@ def user_payload(user):
     }
 
 
-def is_admin_or_operator(user):
-    return user.is_authenticated and (user.is_staff or user.groups.filter(name__iexact='operator').exists())
-
-
-def service_summary(service):
+def paginate(request, queryset, serializer_fn, default_page_size=20):
+    try:
+        page = max(int(request.GET.get('page', 1)), 1)
+        page_size = min(max(int(request.GET.get('page_size', default_page_size)), 1), 100)
+    except ValueError:
+        raise ValidationError({'pagination': 'پارامترهای صفحه‌بندی معتبر نیستند.'})
+    paginator = Paginator(queryset, page_size)
+    try:
+        page_obj = paginator.page(page)
+    except EmptyPage:
+        page_obj = paginator.page(paginator.num_pages or 1)
+        page = page_obj.number
     return {
-        'id': service.id,
-        'title': service.title,
-        'slug': service.slug,
-        'short_description': service.short_description,
-        'full_description': service.full_description,
-        'service_type': service.service_type,
-        'is_active': service.is_active,
-        'order': service.order,
-        'rules_config': service.rules_config,
-        'metadata': service.metadata,
+        'results': [serializer_fn(item) for item in page_obj.object_list],
+        'count': paginator.count,
+        'page': page,
+        'page_size': page_size,
     }
 
 
-def service_detail(service):
-    data = service_summary(service)
-    data.update({
-        'full_description': service.full_description,
-        'contents': [
-            {
-                'id': content.id,
-                'content_type': content.content_type,
-                'title': content.title,
-                'body': content.body,
-                'order': content.order,
-                'metadata': content.metadata,
-            }
-            for content in service.contents.filter(is_active=True)
-        ],
-    })
-    return data
+def parse_bool(value, default=False):
+    if value in (None, ''):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ('1', 'true', 'yes', 'on')
 
 
-def form_schema(service):
-    form = getattr(service, 'form', None)
-    if not form:
-        return None
-    return {
-        'id': form.id,
-        'title': form.title,
-        'description': form.description,
-        'fields': [
-            {
-                'id': field.id,
-                'label': field.label,
-                'key': field.key,
-                'type': field.field_type,
-                'required': field.required,
-                'placeholder': field.placeholder,
-                'help_text': field.help_text,
-                'options': field.options,
-                'validation_config': field.validation_config,
-                'order': field.order,
-            }
-            for field in form.fields.filter(is_active=True)
-        ],
-    }
+def parse_json_value(value, default):
+    import json
+    if value in (None, ''):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)
 
 
-def request_payload(instance, include_values=False):
-    data = {
-        'id': instance.id,
-        'tracking_code': instance.tracking_code,
-        'service': service_summary(instance.service),
-        'current_status': instance.current_status,
-        'current_workflow_step': {
-            'id': instance.current_workflow_step_id,
-            'key': instance.current_workflow_step.key if instance.current_workflow_step else None,
-            'title': instance.current_workflow_step.title if instance.current_workflow_step else None,
-        },
-        'submitted_at': instance.submitted_at.isoformat(),
-        'updated_at': instance.updated_at.isoformat(),
-        'is_archived': instance.is_archived,
-        'user': user_payload(instance.user),
-        'admin_assignee': user_payload(instance.admin_assignee) if instance.admin_assignee else None,
-    }
-    if include_values:
-        data['field_values'] = [
-            {
-                'field': value.field.key,
-                'label': value.field.label,
-                'type': value.field.field_type,
-                'value': value.value,
-                'file': value.file.url if value.file else None,
-            }
-            for value in instance.field_values.select_related('field')
-        ]
-        data['history'] = history_payload(instance)
-    return data
+def _django_validation_error_to_drf(exc):
+    if hasattr(exc, 'message_dict'):
+        raise ValidationError(exc.message_dict)
+    raise ValidationError({'detail': exc.messages})
 
 
-def content_payload(content):
-    return {
-        'id': content.id,
-        'content_type': content.content_type,
-        'title': content.title,
-        'body': content.body,
-        'order': content.order,
-        'is_active': content.is_active,
-        'metadata': content.metadata,
-    }
+# ── Auth views ────────────────────────────────────────────────────────────────
+
+class SendOtpView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        data = request.data
+        phone_number = data.get('phone_number') or data.get('username')
+        ser = SendOtpSerializer(data={'phone_number': phone_number or ''})
+        ser.is_valid(raise_exception=True)
+        phone_number = ser.validated_data['phone_number']
+
+        from apps.fundzi.otp_backend import OTP_TTL_SECONDS, generate_otp, send_otp
+        code = generate_otp()
+        request.session['_otp_code'] = code
+        request.session['_otp_phone'] = phone_number
+        request.session['_otp_expires'] = time.time() + OTP_TTL_SECONDS
+
+        sent = send_otp(phone_number, code)
+        if not sent:
+            raise ValidationError({'detail': 'ارسال کد ورود ناموفق بود. لطفاً دوباره تلاش کنید.'})
+        return Response({'detail': 'کد ورود ارسال شد.'})
 
 
-def admin_service_payload(service):
-    data = service_summary(service)
-    data['contents'] = [content_payload(item) for item in service.contents.all()]
-    form = getattr(service, 'form', None)
-    data['form'] = None if not form else {
-        'id': form.id,
-        'title': form.title,
-        'description': form.description,
-        'is_active': form.is_active,
-        'metadata': form.metadata,
-        'fields': [
-            {
-                'id': field.id,
-                'label': field.label,
-                'key': field.key,
-                'type': field.field_type,
-                'field_type': field.field_type,
-                'required': field.required,
-                'placeholder': field.placeholder,
-                'help_text': field.help_text,
-                'options': field.options,
-                'validation_config': field.validation_config,
-                'order': field.order,
-                'is_active': field.is_active,
-            }
-            for field in form.fields.all()
-        ],
-    }
-    workflow = getattr(service, 'workflow', None)
-    data['workflow'] = None if not workflow else {
-        'id': workflow.id,
-        'name': workflow.name,
-        'description': workflow.description,
-        'is_active': workflow.is_active,
-        'steps': [
-            {
-                'id': step.id,
-                'key': step.key,
-                'title': step.title,
-                'description': step.description,
-                'order': step.order,
-                'is_initial': step.is_initial,
-                'is_terminal': step.is_terminal,
-                'is_active': step.is_active,
-                'metadata': step.metadata,
-            }
-            for step in workflow.steps.all()
-        ],
-    }
-    return data
+class VerifyOtpView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        from django.conf import settings as django_settings
+        data = request.data
+        phone_number = data.get('phone_number') or data.get('username')
+        otp_code = data.get('otp_code') or data.get('code') or ''
+        ser = VerifyOtpSerializer(data={'phone_number': phone_number or '', 'otp_code': otp_code})
+        ser.is_valid(raise_exception=True)
+        phone_number = ser.validated_data['phone_number']
+        otp_code = ser.validated_data['otp_code']
+
+        if getattr(django_settings, 'FUNDZI_OTP_ENABLED', True):
+            if not otp_code:
+                raise ValidationError({'otp_code': 'کد ورود الزامی است.'})
+            stored_code = request.session.get('_otp_code')
+            stored_phone = request.session.get('_otp_phone')
+            expires = request.session.get('_otp_expires', 0)
+            if stored_phone != phone_number or not stored_code:
+                raise ValidationError({'otp_code': 'ابتدا درخواست ارسال کد کنید.'})
+            if time.time() > expires:
+                raise ValidationError({'otp_code': 'کد ورود منقضی شده است. لطفاً کد جدید دریافت کنید.'})
+            if otp_code != stored_code:
+                raise ValidationError({'otp_code': 'کد وارد شده معتبر نیست.'})
+            for key in ('_otp_code', '_otp_phone', '_otp_expires'):
+                request.session.pop(key, None)
+
+        User = get_user_model()
+        user, _ = User.objects.get_or_create(username=phone_number, defaults={'first_name': ''})
+        user.backend = 'django.contrib.auth.backends.ModelBackend'
+        login(request, user)
+        return Response({'user': user_payload(user)})
 
 
-def user_admin_payload(user):
+class PasswordLoginView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        ser = PasswordLoginSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user = authenticate(
+            request,
+            username=ser.validated_data['username'],
+            password=ser.validated_data['password'],
+        )
+        if not user:
+            raise ValidationError({'credentials': 'نام کاربری یا رمز عبور معتبر نیست.'})
+        login(request, user)
+        return Response({'user': user_payload(user)})
+
+
+class CurrentUserView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def get(self, request):
+        return Response({'user': user_payload(request.user)})
+
+
+class LogoutView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        logout(request)
+        return Response({'detail': 'خارج شدید.'})
+
+
+# ── Service views ─────────────────────────────────────────────────────────────
+
+class ServiceListView(APIView):
+    permission_classes = []
+
+    def get(self, request):
+        services = FinancialService.objects.filter(is_active=True)
+        return Response({'results': ServiceListSerializer(services, many=True).data})
+
+
+class ServiceDetailView(APIView):
+    permission_classes = []
+
+    def get(self, request, slug):
+        service = get_object_or_404(FinancialService, slug=slug, is_active=True)
+        return Response(ServiceDetailSerializer(service).data)
+
+
+class ServiceFormView(APIView):
+    permission_classes = []
+
+    def get(self, request, slug):
+        service = get_object_or_404(FinancialService, slug=slug, is_active=True)
+        form = getattr(service, 'form', None)
+        if not form:
+            raise NotFound({'form': 'فرم این سرویس تعریف نشده است.'})
+        return Response(FormSchemaSerializer().to_representation(form))
+
+
+# ── User request views ────────────────────────────────────────────────────────
+
+class ServiceRequestCreateView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def post(self, request, slug):
+        service = get_object_or_404(FinancialService, slug=slug, is_active=True)
+        try:
+            financing_request = create_financing_request(service, request.user, request.data, request.FILES)
+        except DjangoValidationError as exc:
+            _django_validation_error_to_drf(exc)
+        return Response(
+            FinancingRequestDetailSerializer(financing_request).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class RequestListView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def get(self, request):
+        qs = (
+            FinancingRequest.objects
+            .filter(user=request.user)
+            .select_related('service', 'current_workflow_step')
+        )
+        return Response({'results': FinancingRequestSerializer(qs, many=True).data})
+
+
+class RequestDetailView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def get(self, request, pk):
+        instance = get_object_or_404(
+            FinancingRequest.objects.select_related('service', 'current_workflow_step'),
+            pk=pk,
+            user=request.user,
+        )
+        return Response(FinancingRequestDetailSerializer(instance).data)
+
+
+class RequestHistoryView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def get(self, request, pk):
+        instance = get_object_or_404(FinancingRequest, pk=pk, user=request.user)
+        from apps.fundzi.api.serializers import RequestHistorySerializer
+        history = instance.history.select_related('changed_by')
+        return Response({'results': RequestHistorySerializer(history, many=True).data})
+
+
+# ── Admin request views ───────────────────────────────────────────────────────
+
+class AdminRequestListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request):
+        qs = FinancingRequest.objects.select_related(
+            'service', 'current_workflow_step', 'user', 'admin_assignee'
+        )
+        svc = request.GET.get('service')
+        req_status = request.GET.get('status')
+        tracking_code = request.GET.get('tracking_code')
+        user_phone = request.GET.get('user_phone')
+        search = request.GET.get('q') or request.GET.get('search')
+        ordering = request.GET.get('ordering') or '-submitted_at'
+        if svc:
+            qs = qs.filter(service__slug=svc)
+        if req_status:
+            qs = qs.filter(current_status=req_status)
+        if tracking_code:
+            qs = qs.filter(tracking_code__icontains=tracking_code)
+        if user_phone:
+            qs = qs.filter(user__username__icontains=user_phone)
+        if search:
+            qs = qs.filter(
+                Q(tracking_code__icontains=search)
+                | Q(user__username__icontains=search)
+                | Q(service__title__icontains=search)
+                | Q(current_status__icontains=search)
+            )
+        allowed_ordering = {
+            'submitted_at', '-submitted_at', 'current_status',
+            '-current_status', 'updated_at', '-updated_at',
+        }
+        if ordering not in allowed_ordering:
+            ordering = '-submitted_at'
+        qs = qs.order_by(ordering, '-id')
+        return Response(paginate(request, qs, lambda r: FinancingRequestSerializer(r).data))
+
+
+class AdminStatsView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request):
+        today = timezone.localdate()
+        week_ago = timezone.now() - timedelta(days=7)
+        requests = FinancingRequest.objects.select_related('service', 'user', 'admin_assignee')
+        by_status = list(requests.values('current_status').annotate(count=Count('id')).order_by('current_status'))
+        by_service = list(
+            requests.values('service__id', 'service__title', 'service__slug')
+            .annotate(count=Count('id')).order_by('-count')
+        )
+        latest = requests.order_by('-submitted_at')[:8]
+        User = get_user_model()
+        return Response({
+            'total_requests': requests.count(),
+            'by_status': by_status,
+            'by_service': [
+                {'service_id': i['service__id'], 'title': i['service__title'], 'slug': i['service__slug'], 'count': i['count']}
+                for i in by_service
+            ],
+            'today_requests': requests.filter(submitted_at__date=today).count(),
+            'last_7_days_requests': requests.filter(submitted_at__gte=week_ago).count(),
+            'archived_requests': requests.filter(is_archived=True).count(),
+            'users_count': User.objects.count(),
+            'latest_requests': FinancingRequestSerializer(latest, many=True).data,
+        })
+
+
+class AdminRequestDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request, pk):
+        instance = get_object_or_404(
+            FinancingRequest.objects.select_related('service', 'current_workflow_step', 'user'),
+            pk=pk,
+        )
+        return Response(AdminRequestDetailSerializer(instance).data)
+
+
+class AdminRequestAssignView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, pk):
+        instance = get_object_or_404(FinancingRequest.objects.select_related('service'), pk=pk)
+        assignee_id = request.data.get('assignee_id')
+        if assignee_id in (None, '', 'null'):
+            instance.admin_assignee = None
+        else:
+            User = get_user_model()
+            assignee = get_object_or_404(User, pk=assignee_id)
+            if not is_admin_or_operator(assignee):
+                raise ValidationError({'assignee_id': 'مسئول انتخاب‌شده باید ادمین یا اپراتور باشد.'})
+            instance.admin_assignee = assignee
+        instance.save(update_fields=['admin_assignee', 'updated_at'])
+        return Response(FinancingRequestDetailSerializer(instance).data)
+
+
+class AdminRequestArchiveView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, pk):
+        instance = get_object_or_404(FinancingRequest.objects.select_related('service'), pk=pk)
+        instance.is_archived = parse_bool(request.data.get('is_archived'), instance.is_archived)
+        instance.save(update_fields=['is_archived', 'updated_at'])
+        return Response(FinancingRequestDetailSerializer(instance).data)
+
+
+class AdminRequestAttachmentListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, pk):
+        instance = get_object_or_404(FinancingRequest, pk=pk)
+        upload = request.FILES.get('file')
+        if not upload:
+            raise ValidationError({'file': 'فایل پیوست الزامی است.'})
+        attachment = RequestAttachment.objects.create(
+            request=instance,
+            file=upload,
+            title=request.POST.get('title', upload.name),
+            document_type=request.POST.get('document_type', ''),
+            uploaded_by=request.user,
+        )
+        return Response({
+            'id': attachment.id,
+            'title': attachment.title,
+            'document_type': attachment.document_type,
+            'file': attachment.file.url if attachment.file else None,
+            'created_at': attachment.created_at.isoformat(),
+        }, status=status.HTTP_201_CREATED)
+
+
+class AdminRequestAttachmentDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def delete(self, request, pk, att_id):
+        attachment = get_object_or_404(RequestAttachment, pk=att_id, request_id=pk)
+        attachment.delete()
+        return Response({'detail': 'پیوست حذف شد.'})
+
+
+class AdminRequestStatusView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, pk):
+        return self._update_status(request, pk)
+
+    def patch(self, request, pk):
+        return self._update_status(request, pk)
+
+    def _update_status(self, request, pk):
+        instance = get_object_or_404(FinancingRequest.objects.select_related('service'), pk=pk)
+        step_key = request.data.get('status') or request.data.get('step')
+        try:
+            step = get_object_or_404(WorkflowStep, workflow=instance.service.workflow, key=step_key, is_active=True)
+            instance.change_status(step, changed_by=request.user, note=request.data.get('note', ''))
+        except DjangoValidationError as exc:
+            _django_validation_error_to_drf(exc)
+        return Response(FinancingRequestDetailSerializer(instance).data)
+
+
+class AdminRequestNoteView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, pk):
+        instance = get_object_or_404(FinancingRequest, pk=pk)
+        body = request.data.get('body') or request.data.get('note')
+        if not body:
+            raise ValidationError({'body': 'متن یادداشت الزامی است.'})
+        note = InternalNote.objects.create(request=instance, author=request.user, body=body)
+        return Response({
+            'id': note.id,
+            'body': note.body,
+            'author': request.user.get_username(),
+            'created_at': note.created_at.isoformat(),
+        }, status=status.HTTP_201_CREATED)
+
+
+# ── Admin service views ───────────────────────────────────────────────────────
+
+def _service_from_data(service, data, partial=False):
+    if not partial:
+        for key in ['title', 'slug']:
+            if not data.get(key):
+                raise ValidationError({key: 'این فیلد الزامی است.'})
+    for key in ['title', 'slug', 'short_description', 'full_description', 'service_type']:
+        if key in data:
+            setattr(service, key, data.get(key) or '')
+    if 'is_active' in data:
+        service.is_active = parse_bool(data.get('is_active'), service.is_active)
+    if 'order' in data:
+        service.order = int(data.get('order') or 0)
+    if 'rules_config' in data:
+        service.rules_config = parse_json_value(data.get('rules_config'), {})
+    if 'metadata' in data:
+        service.metadata = parse_json_value(data.get('metadata'), {})
+    try:
+        service.full_clean()
+    except DjangoValidationError as exc:
+        _django_validation_error_to_drf(exc)
+    service.save()
+    return service
+
+
+class AdminServiceListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request):
+        qs = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').all()
+        search = request.GET.get('q') or request.GET.get('search')
+        if search:
+            qs = qs.filter(Q(title__icontains=search) | Q(slug__icontains=search))
+        return Response({'results': [AdminServiceSerializer().to_representation(s) for s in qs]})
+
+    def post(self, request):
+        service = _service_from_data(FinancialService(), request.data)
+        DynamicForm.objects.get_or_create(service=service, defaults={'title': f'فرم {service.title}'})
+        Workflow.objects.get_or_create(service=service, defaults={'name': f'گردش‌کار {service.title}'})
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service.pk)
+        return Response(AdminServiceSerializer().to_representation(service), status=status.HTTP_201_CREATED)
+
+
+class AdminServiceDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request, pk):
+        service = get_object_or_404(
+            FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps'),
+            pk=pk,
+        )
+        return Response(AdminServiceSerializer().to_representation(service))
+
+    def patch(self, request, pk):
+        service = get_object_or_404(FinancialService, pk=pk)
+        _service_from_data(service, request.data, partial=True)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service.pk)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+    def delete(self, request, pk):
+        service = get_object_or_404(FinancialService, pk=pk)
+        if service.requests.exists():
+            raise ValidationError({'service': 'این سرویس درخواست ثبت‌شده دارد و قابل حذف نیست.'})
+        service.delete()
+        return Response({'detail': 'سرویس حذف شد.'})
+
+
+class AdminServiceContentListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, service_id):
+        service = get_object_or_404(FinancialService, pk=service_id)
+        try:
+            content = ServiceContent(
+                service=service,
+                content_type=request.data.get('content_type') or 'introduction',
+                title=request.data.get('title', ''),
+                body=request.data.get('body') or '',
+                order=int(request.data.get('order') or 0),
+                is_active=parse_bool(request.data.get('is_active'), True),
+                metadata=parse_json_value(request.data.get('metadata'), {}),
+            )
+            content.full_clean()
+            content.save()
+        except DjangoValidationError as exc:
+            _django_validation_error_to_drf(exc)
+        return Response({
+            'id': content.id, 'content_type': content.content_type, 'title': content.title,
+            'body': content.body, 'order': content.order, 'is_active': content.is_active,
+            'metadata': content.metadata,
+        }, status=status.HTTP_201_CREATED)
+
+
+class AdminServiceContentDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def patch(self, request, service_id, content_id):
+        content = get_object_or_404(ServiceContent, pk=content_id, service_id=service_id)
+        data = request.data
+        try:
+            for key in ['content_type', 'title', 'body']:
+                if key in data:
+                    setattr(content, key, data.get(key) or '')
+            if 'order' in data:
+                content.order = int(data.get('order') or 0)
+            if 'is_active' in data:
+                content.is_active = parse_bool(data.get('is_active'), content.is_active)
+            if 'metadata' in data:
+                content.metadata = parse_json_value(data.get('metadata'), {})
+            content.full_clean()
+            content.save()
+        except DjangoValidationError as exc:
+            _django_validation_error_to_drf(exc)
+        return Response({
+            'id': content.id, 'content_type': content.content_type, 'title': content.title,
+            'body': content.body, 'order': content.order, 'is_active': content.is_active,
+            'metadata': content.metadata,
+        })
+
+    def delete(self, request, service_id, content_id):
+        content = get_object_or_404(ServiceContent, pk=content_id, service_id=service_id)
+        content.delete()
+        return Response({'detail': 'محتوا حذف شد.'})
+
+
+class AdminServiceFormView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def patch(self, request, service_id):
+        service = get_object_or_404(FinancialService, pk=service_id)
+        form, _ = DynamicForm.objects.get_or_create(service=service, defaults={'title': f'فرم {service.title}'})
+        data = request.data
+        try:
+            for key in ['title', 'description']:
+                if key in data:
+                    setattr(form, key, data.get(key) or '')
+            if 'is_active' in data:
+                form.is_active = parse_bool(data.get('is_active'), form.is_active)
+            if 'metadata' in data:
+                form.metadata = parse_json_value(data.get('metadata'), {})
+            form.full_clean()
+            form.save()
+        except DjangoValidationError as exc:
+            _django_validation_error_to_drf(exc)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service.pk)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+
+def _field_from_data(field, data, form=None, partial=False):
+    if form:
+        field.form = form
+    if not partial:
+        for key in ['label', 'key', 'field_type']:
+            if not data.get(key) and not data.get('type' if key == 'field_type' else key):
+                raise ValidationError({key: 'این فیلد الزامی است.'})
+    if 'type' in data and 'field_type' not in data:
+        data = dict(data)
+        data['field_type'] = data['type']
+    for key in ['label', 'key', 'field_type', 'placeholder', 'help_text']:
+        if key in data:
+            setattr(field, key, data.get(key) or '')
+    if 'required' in data:
+        field.required = parse_bool(data.get('required'), field.required)
+    if 'is_active' in data:
+        field.is_active = parse_bool(data.get('is_active'), field.is_active)
+    if 'order' in data:
+        field.order = int(data.get('order') or 0)
+    if 'options' in data:
+        field.options = parse_json_value(data.get('options'), [])
+    if 'validation_config' in data:
+        field.validation_config = parse_json_value(data.get('validation_config'), {})
+    try:
+        field.full_clean()
+    except DjangoValidationError as exc:
+        _django_validation_error_to_drf(exc)
+    field.save()
+    return field
+
+
+class AdminServiceFieldListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, service_id):
+        service = get_object_or_404(FinancialService, pk=service_id)
+        form, _ = DynamicForm.objects.get_or_create(service=service, defaults={'title': f'فرم {service.title}'})
+        _field_from_data(FormField(), request.data, form=form)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service.pk)
+        return Response(AdminServiceSerializer().to_representation(service), status=status.HTTP_201_CREATED)
+
+
+class AdminServiceFieldDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def patch(self, request, service_id, field_id):
+        field = get_object_or_404(FormField, pk=field_id, form__service_id=service_id)
+        _field_from_data(field, request.data, partial=True)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service_id)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+    def delete(self, request, service_id, field_id):
+        field = get_object_or_404(FormField, pk=field_id, form__service_id=service_id)
+        service_pk = field.form.service_id
+        field.delete()
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service_pk)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+
+class AdminServiceWorkflowView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def patch(self, request, service_id):
+        service = get_object_or_404(FinancialService, pk=service_id)
+        workflow, _ = Workflow.objects.get_or_create(service=service, defaults={'name': f'گردش‌کار {service.title}'})
+        data = request.data
+        try:
+            for key in ['name', 'description']:
+                if key in data:
+                    setattr(workflow, key, data.get(key) or '')
+            if 'is_active' in data:
+                workflow.is_active = parse_bool(data.get('is_active'), workflow.is_active)
+            workflow.full_clean()
+            workflow.save()
+        except DjangoValidationError as exc:
+            _django_validation_error_to_drf(exc)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service.pk)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+
+def _step_from_data(step, data, workflow=None, partial=False):
+    if workflow:
+        step.workflow = workflow
+    if not partial:
+        for key in ['key', 'title']:
+            if not data.get(key):
+                raise ValidationError({key: 'این فیلد الزامی است.'})
+    for key in ['key', 'title', 'description']:
+        if key in data:
+            setattr(step, key, data.get(key) or '')
+    if 'order' in data:
+        step.order = int(data.get('order') or 0)
+    for flag in ['is_initial', 'is_terminal', 'is_active']:
+        if flag in data:
+            setattr(step, flag, parse_bool(data.get(flag), getattr(step, flag)))
+    if 'metadata' in data:
+        step.metadata = parse_json_value(data.get('metadata'), {})
+    try:
+        step.full_clean()
+    except DjangoValidationError as exc:
+        _django_validation_error_to_drf(exc)
+    step.save()
+    if step.is_initial:
+        WorkflowStep.objects.filter(workflow=step.workflow).exclude(pk=step.pk).update(is_initial=False)
+    return step
+
+
+class AdminServiceWorkflowStepListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, service_id):
+        service = get_object_or_404(FinancialService, pk=service_id)
+        workflow, _ = Workflow.objects.get_or_create(service=service, defaults={'name': f'گردش‌کار {service.title}'})
+        _step_from_data(WorkflowStep(), request.data, workflow=workflow)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service_id)
+        return Response(AdminServiceSerializer().to_representation(service), status=status.HTTP_201_CREATED)
+
+
+class AdminServiceWorkflowStepDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def patch(self, request, service_id, step_id):
+        step = get_object_or_404(WorkflowStep, pk=step_id, workflow__service_id=service_id)
+        _step_from_data(step, request.data, partial=True)
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service_id)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+    def delete(self, request, service_id, step_id):
+        step = get_object_or_404(WorkflowStep, pk=step_id, workflow__service_id=service_id)
+        if FinancingRequest.objects.filter(current_workflow_step=step).exists():
+            raise ValidationError({'step': 'این مرحله روی درخواست‌های موجود استفاده شده است.'})
+        service_pk = step.workflow.service_id
+        step.delete()
+        service = FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps').get(pk=service_pk)
+        return Response(AdminServiceSerializer().to_representation(service))
+
+
+# ── Admin user views ──────────────────────────────────────────────────────────
+
+def _require_admin_user(request):
+    if not (request.user.is_staff or request.user.is_superuser):
+        raise PermissionDenied(detail='فقط ادمین به این بخش دسترسی دارد.')
+
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request):
+        _require_admin_user(request)
+        User = get_user_model()
+        qs = (
+            User.objects
+            .annotate(requests_count=Count('fundzi_requests'))
+            .prefetch_related('groups')
+            .order_by('-date_joined')
+        )
+        search = request.GET.get('q') or request.GET.get('search')
+        role = request.GET.get('role')
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+            )
+        if role:
+            if role == 'admin':
+                qs = qs.filter(Q(is_staff=True) | Q(is_superuser=True))
+            else:
+                qs = qs.filter(groups__name__iexact=role)
+        return Response(paginate(request, qs.distinct(), lambda u: _user_admin_payload(u)))
+
+    def post(self, request):
+        _require_admin_user(request)
+        User = get_user_model()
+        data = request.data
+        username = (data.get('phone_number') or data.get('username') or '').strip()
+        if not username:
+            raise ValidationError({'phone_number': 'شماره موبایل الزامی است.'})
+        if User.objects.filter(username=username).exists():
+            raise ValidationError({'phone_number': 'کاربری با این شماره موبایل از قبل وجود دارد.'})
+        role = data.get('role') or 'applicant'
+        if role not in ROLE_CHOICES:
+            raise ValidationError({'role': 'نقش انتخاب‌شده معتبر نیست.'})
+        user = User(
+            username=username,
+            first_name=data.get('first_name') or '',
+            last_name=data.get('last_name') or '',
+            is_active=parse_bool(data.get('is_active'), True),
+        )
+        password = data.get('password')
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.save()
+        apply_role(user, role)
+        user = User.objects.annotate(requests_count=Count('fundzi_requests')).get(pk=user.pk)
+        return Response(_user_admin_payload(user), status=status.HTTP_201_CREATED)
+
+
+class AdminUserDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request, pk):
+        _require_admin_user(request)
+        User = get_user_model()
+        user = get_object_or_404(
+            User.objects.annotate(requests_count=Count('fundzi_requests')).prefetch_related('groups'),
+            pk=pk,
+        )
+        return Response(_user_admin_payload(user))
+
+    def patch(self, request, pk):
+        _require_admin_user(request)
+        User = get_user_model()
+        user = get_object_or_404(User, pk=pk)
+        data = request.data
+        for key in ['first_name', 'last_name']:
+            if key in data:
+                setattr(user, key, data.get(key) or '')
+        if 'is_active' in data and user.pk == request.user.pk and not parse_bool(data.get('is_active'), True):
+            raise ValidationError({'is_active': 'نمی‌توانید حساب خود را غیرفعال کنید.'})
+        for key in ['is_active', 'is_staff']:
+            if key in data:
+                setattr(user, key, parse_bool(data.get(key), getattr(user, key)))
+        if 'groups' in data:
+            groups = []
+            for name in parse_json_value(data.get('groups'), []):
+                group, _ = Group.objects.get_or_create(name=str(name))
+                groups.append(group)
+            user.groups.set(groups)
+        user.save()
+        user = User.objects.annotate(requests_count=Count('fundzi_requests')).get(pk=user.pk)
+        return Response(_user_admin_payload(user))
+
+
+class AdminUserSetRoleView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def post(self, request, pk):
+        _require_admin_user(request)
+        User = get_user_model()
+        user = get_object_or_404(User, pk=pk)
+        role = request.data.get('role')
+        if role not in ROLE_CHOICES:
+            raise ValidationError({'role': 'نقش انتخاب‌شده معتبر نیست.'})
+        if user.pk == request.user.pk and role != 'admin':
+            raise ValidationError({'role': 'نمی‌توانید نقش مدیریتی خود را تغییر دهید.'})
+        apply_role(user, role)
+        user = type(user).objects.annotate(requests_count=Count('fundzi_requests')).get(pk=user.pk)
+        return Response(_user_admin_payload(user))
+
+
+def _user_admin_payload(user):
     return {
         'id': user.id,
         'username': user.get_username(),
@@ -356,919 +916,107 @@ def user_admin_payload(user):
     }
 
 
-def partner_payload(partner):
-    return {
-        'id': partner.id,
-        'name': partner.name,
-        'type': partner.type,
-        'service_categories': partner.service_categories,
-        'min_amount': partner.min_amount,
-        'max_amount': partner.max_amount,
-        'accepted_collateral_types': partner.accepted_collateral_types,
-        'is_active': partner.is_active,
-        'description': partner.description,
-        'created_at': partner.created_at.isoformat(),
-        'updated_at': partner.updated_at.isoformat(),
-    }
+# ── Admin partner views ───────────────────────────────────────────────────────
 
+class AdminPartnerListView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
-@method_decorator(csrf_exempt, name='dispatch')
-class SendOtpView(View):
-    def post(self, request):
-        try:
-            payload = parse_payload(request)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        phone_number = payload.get('phone_number') or payload.get('username')
-        if not phone_number:
-            return error_response({'phone_number': 'شماره موبایل الزامی است.'})
-
-        from apps.fundzi.otp_backend import OTP_TTL_SECONDS, generate_otp, send_otp
-        code = generate_otp()
-        request.session['_otp_code'] = code
-        request.session['_otp_phone'] = phone_number
-        request.session['_otp_expires'] = time.time() + OTP_TTL_SECONDS
-
-        sent = send_otp(phone_number, code)
-        if not sent:
-            return error_response({'detail': 'ارسال کد ورود ناموفق بود. لطفاً دوباره تلاش کنید.'}, status=503)
-        return JsonResponse({'detail': 'کد ورود ارسال شد.'})
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-class VerifyOtpView(View):
-    def post(self, request):
-        try:
-            payload = parse_payload(request)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        phone_number = payload.get('phone_number') or payload.get('username')
-        otp_code = payload.get('otp_code') or payload.get('code')
-        if not phone_number:
-            return error_response({'phone_number': 'شماره موبایل الزامی است.'})
-        if getattr(settings, 'FUNDZI_OTP_ENABLED', True):
-            if not otp_code:
-                return error_response({'otp_code': 'کد ورود الزامی است.'})
-            stored_code = request.session.get('_otp_code')
-            stored_phone = request.session.get('_otp_phone')
-            expires = request.session.get('_otp_expires', 0)
-            if stored_phone != phone_number or not stored_code:
-                return error_response({'otp_code': 'ابتدا درخواست ارسال کد کنید.'})
-            if time.time() > expires:
-                return error_response({'otp_code': 'کد ورود منقضی شده است. لطفاً کد جدید دریافت کنید.'})
-            if otp_code != stored_code:
-                return error_response({'otp_code': 'کد وارد شده معتبر نیست.'})
-            for key in ('_otp_code', '_otp_phone', '_otp_expires'):
-                request.session.pop(key, None)
-        User = get_user_model()
-        user, _ = User.objects.get_or_create(username=phone_number, defaults={'first_name': ''})
-        user.backend = 'django.contrib.auth.backends.ModelBackend'
-        login(request, user)
-        return JsonResponse({'user': user_payload(user)})
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-class PasswordLoginView(View):
-    def post(self, request):
-        try:
-            payload = parse_payload(request)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        user = authenticate(request, username=payload.get('username'), password=payload.get('password'))
-        if not user:
-            return error_response({'credentials': 'نام کاربری یا رمز عبور معتبر نیست.'}, status=401)
-        login(request, user)
-        return JsonResponse({'user': user_payload(user)})
-
-
-@method_decorator(api_login_required, name='dispatch')
-class CurrentUserView(View):
     def get(self, request):
-        return JsonResponse({'user': user_payload(request.user)})
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-class LogoutView(View):
-    def post(self, request):
-        logout(request)
-        return JsonResponse({'detail': 'خارج شدید.'})
-
-
-def history_payload(instance):
-    return [
-        {
-            'id': item.id,
-            'from_status': item.from_status,
-            'to_status': item.to_status,
-            'changed_by': item.changed_by.get_username() if item.changed_by else None,
-            'note': item.note,
-            'created_at': item.created_at.isoformat(),
-        }
-        for item in instance.history.select_related('changed_by')
-    ]
-
-
-@require_GET
-def service_list(request):
-    services = FinancialService.objects.filter(is_active=True)
-    return JsonResponse({'results': [service_summary(service) for service in services]})
-
-
-@require_GET
-def service_detail_view(request, slug):
-    service = get_object_or_404(FinancialService, slug=slug, is_active=True)
-    return JsonResponse(service_detail(service))
-
-
-@require_GET
-def service_form_view(request, slug):
-    service = get_object_or_404(FinancialService, slug=slug, is_active=True)
-    schema = form_schema(service)
-    if not schema:
-        return error_response({'form': 'فرم این سرویس تعریف نشده است.'}, status=404)
-    return JsonResponse(schema)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_login_required, name='dispatch')
-class ServiceRequestCreateView(View):
-    def post(self, request, slug):
-        service = get_object_or_404(FinancialService, slug=slug, is_active=True)
-        try:
-            payload = parse_payload(request)
-            financing_request = create_financing_request(service, request.user, payload, request.FILES)
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(request_payload(financing_request, include_values=True), status=201)
-
-
-@method_decorator(api_login_required, name='dispatch')
-class RequestListView(View):
-    def get(self, request):
-        queryset = FinancingRequest.objects.filter(user=request.user).select_related('service', 'current_workflow_step')
-        return JsonResponse({'results': [request_payload(item) for item in queryset]})
-
-
-@method_decorator(api_login_required, name='dispatch')
-class RequestDetailView(View):
-    def get(self, request, pk):
-        instance = get_object_or_404(
-            FinancingRequest.objects.select_related('service', 'current_workflow_step'),
-            pk=pk,
-            user=request.user,
-        )
-        return JsonResponse(request_payload(instance, include_values=True))
-
-
-@method_decorator(api_login_required, name='dispatch')
-class RequestHistoryView(View):
-    def get(self, request, pk):
-        instance = get_object_or_404(FinancingRequest, pk=pk, user=request.user)
-        return JsonResponse({'results': history_payload(instance)})
-
-
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestListView(View):
-    def get(self, request):
-        queryset = FinancingRequest.objects.select_related(
-            'service',
-            'current_workflow_step',
-            'user',
-            'admin_assignee',
-        ).all()
-        service = request.GET.get('service')
-        status = request.GET.get('status')
-        tracking_code = request.GET.get('tracking_code')
-        user_phone = request.GET.get('user_phone')
-        search = request.GET.get('q') or request.GET.get('search')
-        ordering = request.GET.get('ordering') or '-submitted_at'
-        if service:
-            queryset = queryset.filter(service__slug=service)
-        if status:
-            queryset = queryset.filter(current_status=status)
-        if tracking_code:
-            queryset = queryset.filter(tracking_code__icontains=tracking_code)
-        if user_phone:
-            queryset = queryset.filter(user__username__icontains=user_phone)
-        if search:
-            queryset = queryset.filter(
-                Q(tracking_code__icontains=search)
-                | Q(user__username__icontains=search)
-                | Q(service__title__icontains=search)
-                | Q(current_status__icontains=search)
-            )
-        allowed_ordering = {'submitted_at', '-submitted_at', 'current_status', '-current_status', 'updated_at', '-updated_at'}
-        if ordering not in allowed_ordering:
-            ordering = '-submitted_at'
-        queryset = queryset.order_by(ordering, '-id')
-        payload, error = paginate_payload(request, queryset, request_payload)
-        if error:
-            return error
-        return JsonResponse(payload)
-
-
-@method_decorator(api_staff_required, name='dispatch')
-class AdminStatsView(View):
-    def get(self, request):
-        today = timezone.localdate()
-        week_ago = timezone.now() - timedelta(days=7)
-        requests = FinancingRequest.objects.select_related('service', 'user', 'admin_assignee')
-        by_status = list(requests.values('current_status').annotate(count=Count('id')).order_by('current_status'))
-        by_service = list(requests.values('service__id', 'service__title', 'service__slug').annotate(count=Count('id')).order_by('-count'))
-        latest = requests.order_by('-submitted_at')[:8]
-        User = get_user_model()
-        return JsonResponse({
-            'total_requests': requests.count(),
-            'by_status': by_status,
-            'by_service': [
-                {
-                    'service_id': item['service__id'],
-                    'title': item['service__title'],
-                    'slug': item['service__slug'],
-                    'count': item['count'],
-                }
-                for item in by_service
-            ],
-            'today_requests': requests.filter(submitted_at__date=today).count(),
-            'last_7_days_requests': requests.filter(submitted_at__gte=week_ago).count(),
-            'archived_requests': requests.filter(is_archived=True).count(),
-            'users_count': User.objects.count(),
-            'latest_requests': [request_payload(item) for item in latest],
-        })
-
-
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestDetailView(View):
-    def get(self, request, pk):
-        instance = get_object_or_404(
-            FinancingRequest.objects.select_related('service', 'current_workflow_step', 'user'),
-            pk=pk,
-        )
-        data = request_payload(instance, include_values=True)
-        data['attachments'] = [
-            {
-                'id': attachment.id,
-                'title': attachment.title,
-                'document_type': attachment.document_type,
-                'file': attachment.file.url if attachment.file else None,
-                'created_at': attachment.created_at.isoformat(),
-            }
-            for attachment in instance.attachments.all()
-        ]
-        data['internal_notes'] = [
-            {
-                'id': note.id,
-                'body': note.body,
-                'author': note.author.get_username() if note.author else None,
-                'created_at': note.created_at.isoformat(),
-            }
-            for note in instance.internal_notes.select_related('author')
-        ]
-        data['workflow_steps'] = [
-            {'id': step.id, 'key': step.key, 'title': step.title, 'order': step.order}
-            for step in instance.service.workflow.steps.filter(is_active=True)
-        ]
-        return JsonResponse(data)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestAssignView(View):
-    def post(self, request, pk):
-        instance = get_object_or_404(FinancingRequest.objects.select_related('service'), pk=pk)
-        try:
-            payload = parse_payload(request)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        assignee_id = payload.get('assignee_id')
-        if assignee_id in (None, '', 'null'):
-            instance.admin_assignee = None
-        else:
-            User = get_user_model()
-            assignee = get_object_or_404(User, pk=assignee_id)
-            if not is_admin_or_operator(assignee):
-                return error_response({'assignee_id': 'مسئول انتخاب‌شده باید ادمین یا اپراتور باشد.'}, status=400)
-            instance.admin_assignee = assignee
-        instance.save(update_fields=['admin_assignee', 'updated_at'])
-        return JsonResponse(request_payload(instance, include_values=True))
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestArchiveView(View):
-    def post(self, request, pk):
-        instance = get_object_or_404(FinancingRequest.objects.select_related('service'), pk=pk)
-        try:
-            payload = parse_payload(request)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        instance.is_archived = parse_bool(payload.get('is_archived'), instance.is_archived)
-        instance.save(update_fields=['is_archived', 'updated_at'])
-        return JsonResponse(request_payload(instance, include_values=True))
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestAttachmentListView(View):
-    def post(self, request, pk):
-        instance = get_object_or_404(FinancingRequest, pk=pk)
-        upload = request.FILES.get('file')
-        if not upload:
-            return error_response({'file': 'فایل پیوست الزامی است.'})
-        attachment = RequestAttachment.objects.create(
-            request=instance,
-            file=upload,
-            title=request.POST.get('title', upload.name),
-            document_type=request.POST.get('document_type', ''),
-            uploaded_by=request.user,
-        )
-        return JsonResponse({
-            'id': attachment.id,
-            'title': attachment.title,
-            'document_type': attachment.document_type,
-            'file': attachment.file.url if attachment.file else None,
-            'created_at': attachment.created_at.isoformat(),
-        }, status=201)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestAttachmentDetailView(View):
-    def delete(self, request, pk, att_id):
-        attachment = get_object_or_404(RequestAttachment, pk=att_id, request_id=pk)
-        attachment.delete()
-        return JsonResponse({'detail': 'پیوست حذف شد.'})
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestStatusView(View):
-    def post(self, request, pk):
-        return self.update_status(request, pk)
-
-    def patch(self, request, pk):
-        return self.update_status(request, pk)
-
-    def update_status(self, request, pk):
-        instance = get_object_or_404(FinancingRequest.objects.select_related('service'), pk=pk)
-        try:
-            payload = parse_payload(request)
-            step_key = payload.get('status') or payload.get('step')
-            step = get_object_or_404(WorkflowStep, workflow=instance.service.workflow, key=step_key, is_active=True)
-            instance.change_status(step, changed_by=request.user, note=payload.get('note', ''))
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(request_payload(instance, include_values=True))
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestNoteView(View):
-    def post(self, request, pk):
-        instance = get_object_or_404(FinancingRequest, pk=pk)
-        try:
-            payload = parse_payload(request)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        body = payload.get('body') or payload.get('note')
-        if not body:
-            return error_response({'body': 'متن یادداشت الزامی است.'})
-        note = InternalNote.objects.create(request=instance, author=request.user, body=body)
-        return JsonResponse({
-            'id': note.id,
-            'body': note.body,
-            'author': request.user.get_username(),
-            'created_at': note.created_at.isoformat(),
-        }, status=201)
-
-
-def service_from_payload(service, payload, partial=False):
-    required = ['title', 'slug']
-    if not partial:
-        for key in required:
-            if not payload.get(key):
-                raise ValidationError({key: 'این فیلد الزامی است.'})
-    for key in ['title', 'slug', 'short_description', 'full_description', 'service_type']:
-        if key in payload:
-            setattr(service, key, payload.get(key) or '')
-    if 'is_active' in payload:
-        service.is_active = parse_bool(payload.get('is_active'), service.is_active)
-    if 'order' in payload:
-        service.order = int(payload.get('order') or 0)
-    if 'rules_config' in payload:
-        service.rules_config = parse_json_value(payload.get('rules_config'), {})
-    if 'metadata' in payload:
-        service.metadata = parse_json_value(payload.get('metadata'), {})
-    service.full_clean()
-    service.save()
-    return service
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceListView(View):
-    def get(self, request):
-        queryset = FinancialService.objects.prefetch_related(
-            'contents',
-            'form__fields',
-            'workflow__steps',
-        ).all()
+        qs = FinancialPartner.objects.all().order_by('name')
         search = request.GET.get('q') or request.GET.get('search')
         if search:
-            queryset = queryset.filter(Q(title__icontains=search) | Q(slug__icontains=search))
-        return JsonResponse({'results': [admin_service_payload(service) for service in queryset]})
+            qs = qs.filter(Q(name__icontains=search) | Q(type__icontains=search))
+        return Response({'results': FinancialPartnerSerializer(qs, many=True).data})
 
     def post(self, request):
-        try:
-            payload = parse_payload(request)
-            service = service_from_payload(FinancialService(), payload)
-            DynamicForm.objects.get_or_create(service=service, defaults={'title': f'فرم {service.title}'})
-            Workflow.objects.get_or_create(service=service, defaults={'name': f'گردش‌کار {service.title}'})
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(service), status=201)
+        ser = FinancialPartnerSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        partner = ser.save()
+        return Response(FinancialPartnerSerializer(partner).data, status=status.HTTP_201_CREATED)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceDetailView(View):
+class AdminPartnerDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
     def get(self, request, pk):
-        service = get_object_or_404(FinancialService.objects.prefetch_related('contents', 'form__fields', 'workflow__steps'), pk=pk)
-        return JsonResponse(admin_service_payload(service))
-
-    def patch(self, request, pk):
-        service = get_object_or_404(FinancialService, pk=pk)
-        try:
-            payload = parse_payload(request)
-            service_from_payload(service, payload, partial=True)
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(service))
-
-    def delete(self, request, pk):
-        service = get_object_or_404(FinancialService, pk=pk)
-        if service.requests.exists():
-            return error_response({'service': 'این سرویس درخواست ثبت‌شده دارد و قابل حذف نیست.'}, status=409)
-        service.delete()
-        return JsonResponse({'detail': 'سرویس حذف شد.'})
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceContentListView(View):
-    def post(self, request, service_id):
-        service = get_object_or_404(FinancialService, pk=service_id)
-        try:
-            payload = parse_payload(request)
-            content = ServiceContent.objects.create(
-                service=service,
-                content_type=payload.get('content_type') or 'introduction',
-                title=payload.get('title', ''),
-                body=payload.get('body') or '',
-                order=int(payload.get('order') or 0),
-                is_active=parse_bool(payload.get('is_active'), True),
-                metadata=parse_json_value(payload.get('metadata'), {}),
-            )
-            content.full_clean()
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(content_payload(content), status=201)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceContentDetailView(View):
-    def patch(self, request, service_id, content_id):
-        content = get_object_or_404(ServiceContent, pk=content_id, service_id=service_id)
-        try:
-            payload = parse_payload(request)
-            for key in ['content_type', 'title', 'body']:
-                if key in payload:
-                    setattr(content, key, payload.get(key) or '')
-            if 'order' in payload:
-                content.order = int(payload.get('order') or 0)
-            if 'is_active' in payload:
-                content.is_active = parse_bool(payload.get('is_active'), content.is_active)
-            if 'metadata' in payload:
-                content.metadata = parse_json_value(payload.get('metadata'), {})
-            content.full_clean()
-            content.save()
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(content_payload(content))
-
-    def delete(self, request, service_id, content_id):
-        content = get_object_or_404(ServiceContent, pk=content_id, service_id=service_id)
-        content.delete()
-        return JsonResponse({'detail': 'محتوا حذف شد.'})
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceFormView(View):
-    def patch(self, request, service_id):
-        service = get_object_or_404(FinancialService, pk=service_id)
-        form, _ = DynamicForm.objects.get_or_create(service=service, defaults={'title': f'فرم {service.title}'})
-        try:
-            payload = parse_payload(request)
-            for key in ['title', 'description']:
-                if key in payload:
-                    setattr(form, key, payload.get(key) or '')
-            if 'is_active' in payload:
-                form.is_active = parse_bool(payload.get('is_active'), form.is_active)
-            if 'metadata' in payload:
-                form.metadata = parse_json_value(payload.get('metadata'), {})
-            form.full_clean()
-            form.save()
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(service))
-
-
-def field_from_payload(field, payload, form=None, partial=False):
-    if form:
-        field.form = form
-    if not partial:
-        for key in ['label', 'key', 'field_type']:
-            if not payload.get(key):
-                raise ValidationError({key: 'این فیلد الزامی است.'})
-    if 'type' in payload and 'field_type' not in payload:
-        payload['field_type'] = payload['type']
-    for key in ['label', 'key', 'field_type', 'placeholder', 'help_text']:
-        if key in payload:
-            setattr(field, key, payload.get(key) or '')
-    if 'required' in payload:
-        field.required = parse_bool(payload.get('required'), field.required)
-    if 'is_active' in payload:
-        field.is_active = parse_bool(payload.get('is_active'), field.is_active)
-    if 'order' in payload:
-        field.order = int(payload.get('order') or 0)
-    if 'options' in payload:
-        field.options = parse_json_value(payload.get('options'), [])
-    if 'validation_config' in payload:
-        field.validation_config = parse_json_value(payload.get('validation_config'), {})
-    field.full_clean()
-    field.save()
-    return field
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceFieldListView(View):
-    def post(self, request, service_id):
-        service = get_object_or_404(FinancialService, pk=service_id)
-        form, _ = DynamicForm.objects.get_or_create(service=service, defaults={'title': f'فرم {service.title}'})
-        try:
-            payload = parse_payload(request)
-            field = field_from_payload(FormField(), payload, form=form)
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(service), status=201)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceFieldDetailView(View):
-    def patch(self, request, service_id, field_id):
-        field = get_object_or_404(FormField, pk=field_id, form__service_id=service_id)
-        try:
-            payload = parse_payload(request)
-            field_from_payload(field, payload, partial=True)
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(field.form.service))
-
-    def delete(self, request, service_id, field_id):
-        field = get_object_or_404(FormField, pk=field_id, form__service_id=service_id)
-        service = field.form.service
-        field.delete()
-        return JsonResponse(admin_service_payload(service))
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceWorkflowView(View):
-    def patch(self, request, service_id):
-        service = get_object_or_404(FinancialService, pk=service_id)
-        workflow, _ = Workflow.objects.get_or_create(service=service, defaults={'name': f'گردش‌کار {service.title}'})
-        try:
-            payload = parse_payload(request)
-            for key in ['name', 'description']:
-                if key in payload:
-                    setattr(workflow, key, payload.get(key) or '')
-            if 'is_active' in payload:
-                workflow.is_active = parse_bool(payload.get('is_active'), workflow.is_active)
-            workflow.full_clean()
-            workflow.save()
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(service))
-
-
-def workflow_step_from_payload(step, payload, workflow=None, partial=False):
-    if workflow:
-        step.workflow = workflow
-    if not partial:
-        for key in ['key', 'title']:
-            if not payload.get(key):
-                raise ValidationError({key: 'این فیلد الزامی است.'})
-    for key in ['key', 'title', 'description']:
-        if key in payload:
-            setattr(step, key, payload.get(key) or '')
-    if 'order' in payload:
-        step.order = int(payload.get('order') or 0)
-    if 'is_initial' in payload:
-        step.is_initial = parse_bool(payload.get('is_initial'), step.is_initial)
-    if 'is_terminal' in payload:
-        step.is_terminal = parse_bool(payload.get('is_terminal'), step.is_terminal)
-    if 'is_active' in payload:
-        step.is_active = parse_bool(payload.get('is_active'), step.is_active)
-    if 'metadata' in payload:
-        step.metadata = parse_json_value(payload.get('metadata'), {})
-    step.full_clean()
-    step.save()
-    if step.is_initial:
-        WorkflowStep.objects.filter(workflow=step.workflow).exclude(pk=step.pk).update(is_initial=False)
-    return step
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceWorkflowStepListView(View):
-    def post(self, request, service_id):
-        service = get_object_or_404(FinancialService, pk=service_id)
-        workflow, _ = Workflow.objects.get_or_create(service=service, defaults={'name': f'گردش‌کار {service.title}'})
-        try:
-            payload = parse_payload(request)
-            workflow_step_from_payload(WorkflowStep(), payload, workflow=workflow)
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(service), status=201)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminServiceWorkflowStepDetailView(View):
-    def patch(self, request, service_id, step_id):
-        step = get_object_or_404(WorkflowStep, pk=step_id, workflow__service_id=service_id)
-        try:
-            payload = parse_payload(request)
-            workflow_step_from_payload(step, payload, partial=True)
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            return error_response(exc)
-        return JsonResponse(admin_service_payload(step.workflow.service))
-
-    def delete(self, request, service_id, step_id):
-        step = get_object_or_404(WorkflowStep, pk=step_id, workflow__service_id=service_id)
-        service = step.workflow.service
-        if FinancingRequest.objects.filter(current_workflow_step=step).exists():
-            return error_response({'step': 'این مرحله روی درخواست‌های موجود استفاده شده است.'}, status=409)
-        step.delete()
-        return JsonResponse(admin_service_payload(service))
-
-
-def require_admin_user(request):
-    if not (request.user.is_staff or request.user.is_superuser):
-        return error_response({'detail': 'فقط ادمین به این بخش دسترسی دارد.'}, status=403)
-    return None
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminUserListView(View):
-    def get(self, request):
-        denied = require_admin_user(request)
-        if denied:
-            return denied
-        User = get_user_model()
-        queryset = User.objects.annotate(requests_count=Count('fundzi_requests')).prefetch_related('groups').all().order_by('-date_joined')
-        search = request.GET.get('q') or request.GET.get('search')
-        role = request.GET.get('role')
-        if search:
-            queryset = queryset.filter(Q(username__icontains=search) | Q(first_name__icontains=search) | Q(last_name__icontains=search))
-        if role:
-            if role == 'admin':
-                queryset = queryset.filter(Q(is_staff=True) | Q(is_superuser=True))
-            else:
-                queryset = queryset.filter(groups__name__iexact=role)
-        payload, error = paginate_payload(request, queryset.distinct(), user_admin_payload)
-        if error:
-            return error
-        return JsonResponse(payload)
-
-    def post(self, request):
-        denied = require_admin_user(request)
-        if denied:
-            return denied
-        User = get_user_model()
-        try:
-            payload = parse_payload(request)
-            username = (payload.get('phone_number') or payload.get('username') or '').strip()
-            if not username:
-                return error_response({'phone_number': 'شماره موبایل الزامی است.'})
-            if User.objects.filter(username=username).exists():
-                return error_response({'phone_number': 'کاربری با این شماره موبایل از قبل وجود دارد.'}, status=409)
-            role = payload.get('role') or 'applicant'
-            if role not in ROLE_CHOICES:
-                return error_response({'role': 'نقش انتخاب‌شده معتبر نیست.'})
-            user = User(
-                username=username,
-                first_name=payload.get('first_name') or '',
-                last_name=payload.get('last_name') or '',
-                is_active=parse_bool(payload.get('is_active'), True),
-            )
-            password = payload.get('password')
-            if password:
-                user.set_password(password)
-            else:
-                user.set_unusable_password()
-            user.save()
-            apply_role(user, role)
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        user = User.objects.annotate(requests_count=Count('fundzi_requests')).get(pk=user.pk)
-        return JsonResponse(user_admin_payload(user), status=201)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminUserDetailView(View):
-    def get(self, request, pk):
-        denied = require_admin_user(request)
-        if denied:
-            return denied
-        User = get_user_model()
-        user = get_object_or_404(User.objects.annotate(requests_count=Count('fundzi_requests')).prefetch_related('groups'), pk=pk)
-        return JsonResponse(user_admin_payload(user))
-
-    def patch(self, request, pk):
-        denied = require_admin_user(request)
-        if denied:
-            return denied
-        User = get_user_model()
-        user = get_object_or_404(User, pk=pk)
-        try:
-            payload = parse_payload(request)
-            for key in ['first_name', 'last_name']:
-                if key in payload:
-                    setattr(user, key, payload.get(key) or '')
-            if 'is_active' in payload and user.pk == request.user.pk and not parse_bool(payload.get('is_active'), True):
-                return error_response({'is_active': 'نمی‌توانید حساب خود را غیرفعال کنید.'}, status=409)
-            for key in ['is_active', 'is_staff']:
-                if key in payload:
-                    setattr(user, key, parse_bool(payload.get(key), getattr(user, key)))
-            if 'groups' in payload:
-                groups = []
-                for name in parse_json_value(payload.get('groups'), []):
-                    group, _ = Group.objects.get_or_create(name=str(name))
-                    groups.append(group)
-                user.groups.set(groups)
-            user.save()
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(user_admin_payload(user))
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminUserSetRoleView(View):
-    def post(self, request, pk):
-        denied = require_admin_user(request)
-        if denied:
-            return denied
-        User = get_user_model()
-        user = get_object_or_404(User, pk=pk)
-        try:
-            payload = parse_payload(request)
-            role = payload.get('role')
-            if role not in ROLE_CHOICES:
-                return error_response({'role': 'نقش انتخاب‌شده معتبر نیست.'})
-            if user.pk == request.user.pk and role != 'admin':
-                return error_response({'role': 'نمی‌توانید نقش مدیریتی خود را تغییر دهید.'}, status=409)
-            apply_role(user, role)
-        except json.JSONDecodeError as exc:
-            return error_response(exc)
-        user = type(user).objects.annotate(requests_count=Count('fundzi_requests')).get(pk=user.pk)
-        return JsonResponse(user_admin_payload(user))
-
-
-def partner_from_payload(partner, payload, partial=False):
-    if not partial and not payload.get('name'):
-        raise ValidationError({'name': 'نام همکار الزامی است.'})
-    for key in ['name', 'type', 'description']:
-        if key in payload:
-            setattr(partner, key, payload.get(key) or '')
-    if 'service_categories' in payload:
-        partner.service_categories = parse_json_value(payload.get('service_categories'), [])
-    if 'accepted_collateral_types' in payload:
-        partner.accepted_collateral_types = parse_json_value(payload.get('accepted_collateral_types'), [])
-    if 'min_amount' in payload:
-        partner.min_amount = decimal_from_payload(payload.get('min_amount'))
-    if 'max_amount' in payload:
-        partner.max_amount = decimal_from_payload(payload.get('max_amount'))
-    if 'is_active' in payload:
-        partner.is_active = parse_bool(payload.get('is_active'), partner.is_active)
-    partner.full_clean()
-    partner.save()
-    return partner
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminPartnerListView(View):
-    def get(self, request):
-        queryset = FinancialPartner.objects.all().order_by('name')
-        search = request.GET.get('q') or request.GET.get('search')
-        if search:
-            queryset = queryset.filter(Q(name__icontains=search) | Q(type__icontains=search))
-        return JsonResponse({'results': [partner_payload(item) for item in queryset]})
-
-    def post(self, request):
-        try:
-            payload = parse_payload(request)
-            partner = partner_from_payload(FinancialPartner(), payload)
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(partner_payload(partner), status=201)
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminPartnerDetailView(View):
-    def get(self, request, pk):
-        return JsonResponse(partner_payload(get_object_or_404(FinancialPartner, pk=pk)))
+        partner = get_object_or_404(FinancialPartner, pk=pk)
+        return Response(FinancialPartnerSerializer(partner).data)
 
     def patch(self, request, pk):
         partner = get_object_or_404(FinancialPartner, pk=pk)
-        try:
-            payload = parse_payload(request)
-            partner_from_payload(partner, payload, partial=True)
-        except (ValidationError, json.JSONDecodeError) as exc:
-            return error_response(exc)
-        return JsonResponse(partner_payload(partner))
+        ser = FinancialPartnerSerializer(partner, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(FinancialPartnerSerializer(partner).data)
 
     def delete(self, request, pk):
         partner = get_object_or_404(FinancialPartner, pk=pk)
         partner.delete()
-        return JsonResponse({'detail': 'همکار مالی حذف شد.'})
+        return Response({'detail': 'همکار مالی حذف شد.'})
 
 
-def notification_payload(instance):
+# ── Notification views ────────────────────────────────────────────────────────
+
+def _notification_payload(n):
     return {
-        'id': instance.id,
-        'kind': instance.kind,
-        'channel': instance.channel,
-        'title': instance.title,
-        'body': instance.body,
-        'is_read': instance.is_read,
-        'request_id': instance.request_id,
-        'tracking_code': instance.request.tracking_code if instance.request else None,
-        'created_at': instance.created_at.isoformat(),
+        'id': n.id,
+        'kind': n.kind,
+        'channel': n.channel,
+        'title': n.title,
+        'body': n.body,
+        'is_read': n.is_read,
+        'request_id': n.request_id,
+        'tracking_code': n.request.tracking_code if n.request else None,
+        'created_at': n.created_at.isoformat(),
     }
 
 
-@method_decorator(api_login_required, name='dispatch')
-class NotificationListView(View):
+class NotificationListView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
     def get(self, request):
-        queryset = Notification.objects.filter(user=request.user, channel='in_app').select_related('request')
+        qs = Notification.objects.filter(user=request.user, channel='in_app').select_related('request')
         if parse_bool(request.GET.get('unread'), False):
-            queryset = queryset.filter(is_read=False)
-        payload, error = paginate_payload(request, queryset, notification_payload)
-        if error:
-            return error
+            qs = qs.filter(is_read=False)
+        payload = paginate(request, qs, _notification_payload)
         payload['unread_count'] = Notification.objects.filter(
             user=request.user, channel='in_app', is_read=False
         ).count()
-        return JsonResponse(payload)
+        return Response(payload)
 
 
-@method_decorator(api_login_required, name='dispatch')
-class NotificationUnreadCountView(View):
+class NotificationUnreadCountView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
     def get(self, request):
         count = Notification.objects.filter(user=request.user, channel='in_app', is_read=False).count()
-        return JsonResponse({'unread_count': count})
+        return Response({'unread_count': count})
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_login_required, name='dispatch')
-class NotificationReadView(View):
+class NotificationReadView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
     def post(self, request, pk):
         notification = get_object_or_404(Notification, pk=pk, user=request.user)
         notification.mark_read()
-        return JsonResponse(notification_payload(notification))
+        return Response(_notification_payload(notification))
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_login_required, name='dispatch')
-class NotificationReadAllView(View):
+class NotificationReadAllView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
     def post(self, request):
         updated = Notification.objects.filter(
             user=request.user, channel='in_app', is_read=False
         ).update(is_read=True, read_at=timezone.now())
-        return JsonResponse({'detail': 'همه اعلان‌ها خوانده شد.', 'updated': updated})
+        return Response({'detail': 'همه اعلان‌ها خوانده شد.', 'updated': updated})
 
 
-class HealthCheckView(View):
+# ── Health check ──────────────────────────────────────────────────────────────
+
+class HealthCheckView(APIView):
+    permission_classes = []
+
     def get(self, request):
         from django.db import connection
         try:
@@ -1276,45 +1024,14 @@ class HealthCheckView(View):
             db_ok = True
         except Exception:
             db_ok = False
-        status = 200 if db_ok else 503
-        return JsonResponse({'status': 'ok' if db_ok else 'error', 'db': db_ok}, status=status)
+        code = status.HTTP_200_OK if db_ok else status.HTTP_503_SERVICE_UNAVAILABLE
+        return Response({'status': 'ok' if db_ok else 'error', 'db': db_ok}, status=code)
 
 
 # ── Phase 3.1: Partner Portal ─────────────────────────────────────────────────
 
-def api_partner_required(view_func):
-    """Require the user to be a member of an active FinancialPartner.
-
-    Attaches request.partner and request.partner_role on success.
-    """
-    @wraps(view_func)
-    def wrapper(request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return JsonResponse(
-                {'errors': {'detail': 'برای انجام این عملیات باید وارد شوید.'}},
-                status=401,
-            )
-        membership = (
-            request.user.partner_memberships
-            .select_related('partner')
-            .filter(partner__is_active=True)
-            .first()
-        )
-        if not membership:
-            return JsonResponse(
-                {'errors': {'detail': 'شما عضو هیچ همکار مالی فعالی نیستید.'}},
-                status=403,
-            )
-        request.partner = membership.partner
-        request.partner_role = membership.role
-        return view_func(request, *args, **kwargs)
-    return wrapper
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_partner_required, name='dispatch')
-class PartnerRequestListView(View):
-    """GET /api/fundzi/partner/requests/ — requests assigned to this partner."""
+class PartnerRequestListView(APIView):
+    permission_classes = [IsPartnerUser]
 
     def get(self, request):
         qs = (
@@ -1335,12 +1052,11 @@ class PartnerRequestListView(View):
             }
             for r in qs
         ]
-        return JsonResponse({'results': data})
+        return Response({'results': data})
 
 
-@method_decorator(api_partner_required, name='dispatch')
-class PartnerRequestDetailView(View):
-    """GET /api/fundzi/partner/requests/<id>/ — detail without user PII."""
+class PartnerRequestDetailView(APIView):
+    permission_classes = [IsPartnerUser]
 
     def get(self, request, pk):
         try:
@@ -1351,25 +1067,16 @@ class PartnerRequestDetailView(View):
                 .get(pk=pk)
             )
         except FinancingRequest.DoesNotExist:
-            return JsonResponse({'errors': {'detail': 'درخواست یافت نشد.'}}, status=404)
-
+            raise NotFound({'detail': 'درخواست یافت نشد.'})
         field_values = [
             {'label': fv.field.label, 'value': fv.value}
-            for fv in r.field_values.select_related('field').all()
+            for fv in r.field_values.select_related('field')
             if fv.field.key not in ('phone_number', 'national_id', 'full_name')
         ]
-        offers = [
-            {
-                'id': o.id,
-                'amount': str(o.amount),
-                'interest_rate': str(o.interest_rate),
-                'duration_months': o.duration_months,
-                'status': o.status,
-                'created_at': o.created_at.isoformat(),
-            }
-            for o in r.partner_offers.filter(partner=request.partner)
-        ]
-        return JsonResponse({
+        offers = PartnerOfferSerializer(
+            r.partner_offers.filter(partner=request.partner), many=True
+        ).data
+        return Response({
             'id': r.id,
             'tracking_code': r.tracking_code,
             'service': r.service.title,
@@ -1380,10 +1087,8 @@ class PartnerRequestDetailView(View):
         })
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_partner_required, name='dispatch')
-class PartnerOfferCreateView(View):
-    """POST /api/fundzi/partner/requests/<id>/offer/"""
+class PartnerOfferCreateView(APIView):
+    permission_classes = [IsPartnerUser]
 
     def post(self, request, pk):
         try:
@@ -1393,51 +1098,15 @@ class PartnerOfferCreateView(View):
                 .get(pk=pk)
             )
         except FinancingRequest.DoesNotExist:
-            return JsonResponse({'errors': {'detail': 'درخواست یافت نشد.'}}, status=404)
-
-        payload = parse_payload(request)
-        errors = {}
-        try:
-            amount = decimal_from_payload(payload.get('amount'))
-        except Exception:
-            amount = None
-        if amount is None or amount <= 0:
-            errors['amount'] = 'مبلغ پیشنهادی الزامی و باید بزرگ‌تر از صفر باشد.'
-        try:
-            interest_rate = decimal_from_payload(payload.get('interest_rate'))
-        except Exception:
-            interest_rate = None
-        if interest_rate is None or interest_rate < 0:
-            errors['interest_rate'] = 'نرخ سود الزامی است.'
-        duration_months = payload.get('duration_months')
-        try:
-            duration_months = int(duration_months)
-            if duration_months <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            errors['duration_months'] = 'مدت (ماه) الزامی و باید عدد مثبت باشد.'
-        if errors:
-            return error_response(errors)
-
-        offer = PartnerOffer.objects.create(
-            request=financing_request,
-            partner=request.partner,
-            submitted_by=request.user,
-            amount=amount,
-            interest_rate=interest_rate,
-            duration_months=duration_months,
-            conditions=payload.get('conditions', ''),
-        )
-        return JsonResponse({
-            'id': offer.id,
-            'status': offer.status,
-            'detail': 'پیشنهاد با موفقیت ثبت شد.',
-        }, status=201)
+            raise NotFound({'detail': 'درخواست یافت نشد.'})
+        ser = PartnerOfferSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        offer = ser.save(request=financing_request, partner=request.partner, submitted_by=request.user)
+        return Response({'id': offer.id, 'status': offer.status, 'detail': 'پیشنهاد با موفقیت ثبت شد.'}, status=status.HTTP_201_CREATED)
 
 
-@method_decorator(api_partner_required, name='dispatch')
-class PartnerOfferListView(View):
-    """GET /api/fundzi/partner/offers/"""
+class PartnerOfferListView(APIView):
+    permission_classes = [IsPartnerUser]
 
     def get(self, request):
         qs = (
@@ -1459,134 +1128,71 @@ class PartnerOfferListView(View):
             }
             for o in qs
         ]
-        return JsonResponse({'results': data})
+        return Response({'results': data})
 
 
 # ── Phase 3.2: Admin Matching Views ──────────────────────────────────────────
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminMatchingRuleListView(View):
-    """GET /api/fundzi/admin/matching-rules/  POST to create."""
+class AdminMatchingRuleListView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def get(self, request):
         qs = MatchingRule.objects.select_related('partner').all()
-        data = [
-            {
-                'id': r.id,
-                'partner_id': r.partner_id,
-                'partner_name': r.partner.name,
-                'priority': r.priority,
-                'conditions': r.conditions,
-                'is_active': r.is_active,
-            }
-            for r in qs
-        ]
-        return JsonResponse({'results': data})
+        return Response({'results': MatchingRuleSerializer(qs, many=True).data})
 
     def post(self, request):
-        payload = parse_payload(request)
-        partner_id = payload.get('partner_id')
-        partner = get_object_or_404(FinancialPartner, pk=partner_id, is_active=True)
-        rule = MatchingRule.objects.create(
-            partner=partner,
-            priority=int(payload.get('priority', 0)),
-            conditions=payload.get('conditions', {}),
-            is_active=parse_bool(payload.get('is_active', True), default=True),
-        )
-        return JsonResponse({'id': rule.id, 'detail': 'قانون تطبیق ایجاد شد.'}, status=201)
+        ser = MatchingRuleWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        rule = ser.save()
+        return Response({'id': rule.id, 'detail': 'قانون تطبیق ایجاد شد.'}, status=status.HTTP_201_CREATED)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminMatchingRuleDetailView(View):
-    """GET/PUT/DELETE /api/fundzi/admin/matching-rules/<id>/"""
+class AdminMatchingRuleDetailView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def get(self, request, pk):
         rule = get_object_or_404(MatchingRule.objects.select_related('partner'), pk=pk)
-        return JsonResponse({
-            'id': rule.id,
-            'partner_id': rule.partner_id,
-            'partner_name': rule.partner.name,
-            'priority': rule.priority,
-            'conditions': rule.conditions,
-            'is_active': rule.is_active,
-        })
+        return Response(MatchingRuleSerializer(rule).data)
 
     def put(self, request, pk):
         rule = get_object_or_404(MatchingRule, pk=pk)
-        payload = parse_payload(request)
-        if 'priority' in payload:
-            rule.priority = int(payload['priority'])
-        if 'conditions' in payload:
-            rule.conditions = payload['conditions']
-        if 'is_active' in payload:
-            rule.is_active = parse_bool(payload['is_active'])
-        rule.save()
-        return JsonResponse({'detail': 'قانون تطبیق به‌روز شد.'})
+        ser = MatchingRuleWriteSerializer(rule, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response({'detail': 'قانون تطبیق به‌روز شد.'})
 
     def delete(self, request, pk):
-        rule = get_object_or_404(MatchingRule, pk=pk)
-        rule.delete()
-        return JsonResponse({'detail': 'قانون حذف شد.'})
+        get_object_or_404(MatchingRule, pk=pk).delete()
+        return Response({'detail': 'قانون حذف شد.'})
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestMatchView(View):
-    """GET /api/fundzi/admin/requests/<id>/matches/
-    POST to run the matching engine manually.
-    """
+class AdminRequestMatchView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def get(self, request, pk):
         financing_request = get_object_or_404(FinancingRequest, pk=pk)
-        results = (
-            MatchResult.objects
-            .filter(request=financing_request)
-            .select_related('partner')
-            .order_by('-score')
-        )
-        data = [
-            {
-                'partner_id': mr.partner_id,
-                'partner_name': mr.partner.name,
-                'score': mr.score,
-                'status': mr.status,
-                'matched_at': mr.matched_at.isoformat(),
-                'assigned_at': mr.assigned_at.isoformat() if mr.assigned_at else None,
-            }
-            for mr in results
-        ]
-        return JsonResponse({'results': data})
+        results = MatchResult.objects.filter(request=financing_request).select_related('partner').order_by('-score')
+        return Response({'results': MatchResultSerializer(results, many=True).data})
 
     def post(self, request, pk):
         from apps.fundzi import matching
         financing_request = get_object_or_404(FinancingRequest, pk=pk)
         matches = matching.run(financing_request)
-        return JsonResponse({
-            'detail': f'{len(matches)} تطبیق یافت شد.',
-            'count': len(matches),
-        })
+        return Response({'detail': f'{len(matches)} تطبیق یافت شد.', 'count': len(matches)})
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-@method_decorator(api_staff_required, name='dispatch')
-class AdminRequestMatchAssignView(View):
-    """POST /api/fundzi/admin/requests/<id>/matches/<partner_id>/assign/"""
+class AdminRequestMatchAssignView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def post(self, request, pk, partner_id):
         financing_request = get_object_or_404(FinancingRequest, pk=pk)
-        match = get_object_or_404(
-            MatchResult,
-            request=financing_request,
-            partner_id=partner_id,
-        )
+        match = get_object_or_404(MatchResult, request=financing_request, partner_id=partner_id)
         if match.status == 'assigned':
-            return JsonResponse({'detail': 'این درخواست قبلاً به همکار ارسال شده است.'})
+            return Response({'detail': 'این درخواست قبلاً به همکار ارسال شده است.'})
         match.status = 'assigned'
         match.assigned_at = timezone.now()
         match.save(update_fields=['status', 'assigned_at'])
-        return JsonResponse({'detail': 'درخواست با موفقیت به همکار مالی ارسال شد.'})
+        return Response({'detail': 'درخواست با موفقیت به همکار مالی ارسال شد.'})
 
 
 # ── Phase 3.5: Reports ────────────────────────────────────────────────────────
@@ -1601,9 +1207,8 @@ def _csv_response(filename, headers, rows):
     return response
 
 
-@method_decorator(api_staff_required, name='dispatch')
-class AdminReportFunnelView(View):
-    """GET /api/fundzi/admin/reports/funnel/?format=csv"""
+class AdminReportFunnelView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def get(self, request):
         qs = (
@@ -1613,14 +1218,13 @@ class AdminReportFunnelView(View):
             .order_by('current_status')
         )
         rows = [(r['current_status'] or '—', r['count']) for r in qs]
-        if request.GET.get('format') == 'csv':
+        if request.query_params.get('export') == 'csv':
             return _csv_response('funnel.csv', ['وضعیت', 'تعداد درخواست'], rows)
-        return JsonResponse({'results': [{'status': s, 'count': c} for s, c in rows]})
+        return Response({'results': [{'status': s, 'count': c} for s, c in rows]})
 
 
-@method_decorator(api_staff_required, name='dispatch')
-class AdminReportPartnerPerformanceView(View):
-    """GET /api/fundzi/admin/reports/partner-performance/?format=csv"""
+class AdminReportPartnerPerformanceView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def get(self, request):
         partners = FinancialPartner.objects.filter(is_active=True)
@@ -1637,19 +1241,15 @@ class AdminReportPartnerPerformanceView(View):
                 'offers_accepted': offers_accepted,
                 'acceptance_rate': round(offers_accepted / offers_total * 100, 1) if offers_total else 0,
             })
-        if request.GET.get('format') == 'csv':
+        if request.query_params.get('export') == 'csv':
             headers = ['همکار', 'درخواست‌های ارسال‌شده', 'پیشنهادهای ثبت‌شده', 'پیشنهادهای پذیرفته', 'نرخ پذیرش (%)']
-            rows = [
-                (r['partner_name'], r['assigned_requests'], r['offers_submitted'], r['offers_accepted'], r['acceptance_rate'])
-                for r in results
-            ]
+            rows = [(r['partner_name'], r['assigned_requests'], r['offers_submitted'], r['offers_accepted'], r['acceptance_rate']) for r in results]
             return _csv_response('partner_performance.csv', headers, rows)
-        return JsonResponse({'results': results})
+        return Response({'results': results})
 
 
-@method_decorator(api_staff_required, name='dispatch')
-class AdminReportMonthlyView(View):
-    """GET /api/fundzi/admin/reports/monthly/?format=csv"""
+class AdminReportMonthlyView(APIView):
+    permission_classes = [IsAdminOrOperator]
 
     def get(self, request):
         qs = (
@@ -1666,7 +1266,7 @@ class AdminReportMonthlyView(View):
             }
             for r in qs
         ]
-        if request.GET.get('format') == 'csv':
+        if request.query_params.get('export') == 'csv':
             rows = [(r['month'], r['total_requests']) for r in results]
             return _csv_response('monthly.csv', ['ماه', 'تعداد درخواست'], rows)
-        return JsonResponse({'results': results})
+        return Response({'results': results})

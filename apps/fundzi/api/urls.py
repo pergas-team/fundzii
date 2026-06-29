@@ -48,11 +48,11 @@ from apps.fundzi.api.views import (
     RequestHistoryView,
     RequestListView,
     SendOtpView,
+    ServiceDetailView,
+    ServiceFormView,
+    ServiceListView,
     ServiceRequestCreateView,
     VerifyOtpView,
-    service_detail_view,
-    service_form_view,
-    service_list,
 )
 
 
@@ -62,9 +62,9 @@ urlpatterns = [
     path('auth/login/', PasswordLoginView.as_view(), name='fundzi-auth-login'),
     path('auth/me/', CurrentUserView.as_view(), name='fundzi-auth-me'),
     path('auth/logout/', LogoutView.as_view(), name='fundzi-auth-logout'),
-    path('services/', service_list, name='fundzi-service-list'),
-    path('services/<slug:slug>/', service_detail_view, name='fundzi-service-detail'),
-    path('services/<slug:slug>/form/', service_form_view, name='fundzi-service-form'),
+    path('services/', ServiceListView.as_view(), name='fundzi-service-list'),
+    path('services/<slug:slug>/', ServiceDetailView.as_view(), name='fundzi-service-detail'),
+    path('services/<slug:slug>/form/', ServiceFormView.as_view(), name='fundzi-service-form'),
     path('services/<slug:slug>/requests/', ServiceRequestCreateView.as_view(), name='fundzi-service-request-create'),
     path('requests/', RequestListView.as_view(), name='fundzi-request-list'),
     path('requests/<int:pk>/', RequestDetailView.as_view(), name='fundzi-request-detail'),
