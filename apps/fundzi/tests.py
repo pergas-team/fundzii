@@ -7,7 +7,18 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from apps.fundzi.models import FinancialService, FinancingRequest, InternalNote, Notification, WorkflowStep
+from apps.fundzi.models import (
+    FinancialPartner,
+    FinancialService,
+    FinancingRequest,
+    InternalNote,
+    MatchingRule,
+    MatchResult,
+    Notification,
+    PartnerOffer,
+    PartnerUser,
+    WorkflowStep,
+)
 
 
 class FundziAPITests(TestCase):
@@ -368,3 +379,208 @@ class HealthCheckTests(TestCase):
         data = response.json()
         self.assertEqual(data['status'], 'ok')
         self.assertTrue(data['db'])
+
+
+class PartnerPortalTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_fundzi', verbosity=0)
+        cls.partner_user = User.objects.create_user('partner1', password='pass')
+        cls.partner = FinancialPartner.objects.create(name='بانک آزمایشی', is_active=True)
+        PartnerUser.objects.create(user=cls.partner_user, partner=cls.partner, role='analyst')
+
+        cls.regular_user = User.objects.create_user('user1', password='pass')
+        service = FinancialService.objects.first()
+        cls.request = FinancingRequest.objects.create(user=cls.regular_user, service=service)
+        MatchResult.objects.create(request=cls.request, partner=cls.partner, score=30, status='assigned')
+
+    def _login(self):
+        self.client.login(username='partner1', password='pass')
+
+    def test_partner_request_list_returns_assigned_requests(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-partner-request-list'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['results'][0]['tracking_code'], self.request.tracking_code)
+
+    def test_partner_request_list_requires_partner_membership(self):
+        self.client.login(username='user1', password='pass')
+        response = self.client.get(reverse('fundzi-partner-request-list'))
+        self.assertEqual(response.status_code, 403)
+
+    def test_partner_request_list_requires_login(self):
+        response = self.client.get(reverse('fundzi-partner-request-list'))
+        self.assertEqual(response.status_code, 401)
+
+    def test_partner_request_detail_hides_pii_fields(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-partner-request-detail', args=[self.request.pk]))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        field_keys = [fv['label'] for fv in data['field_values']]
+        for sensitive in ('phone_number', 'national_id', 'full_name'):
+            self.assertNotIn(sensitive, field_keys)
+
+    def test_partner_can_submit_offer(self):
+        self._login()
+        payload = {
+            'amount': '5000000000',
+            'interest_rate': '23.5',
+            'duration_months': 36,
+            'conditions': 'سند ملکی الزامی است',
+        }
+        response = self.client.post(
+            reverse('fundzi-partner-offer-create', args=[self.request.pk]),
+            data=json.dumps(payload),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(PartnerOffer.objects.filter(partner=self.partner, request=self.request).exists())
+
+    def test_partner_offer_validation_requires_amount(self):
+        self._login()
+        payload = {'interest_rate': '20', 'duration_months': 24}
+        response = self.client.post(
+            reverse('fundzi-partner-offer-create', args=[self.request.pk]),
+            data=json.dumps(payload),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_partner_offer_list_returns_own_offers(self):
+        self._login()
+        PartnerOffer.objects.create(
+            request=self.request, partner=self.partner,
+            submitted_by=self.partner_user,
+            amount=1000000, interest_rate=22, duration_months=12,
+        )
+        response = self.client.get(reverse('fundzi-partner-offer-list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(len(response.json()['results']), 1)
+
+
+class MatchingEngineTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_fundzi', verbosity=0)
+        cls.admin = User.objects.create_superuser('admin2', password='pass')
+        cls.partner = FinancialPartner.objects.create(name='صندوق نمونه', is_active=True)
+        service = FinancialService.objects.first()
+        cls.rule = MatchingRule.objects.create(
+            partner=cls.partner,
+            priority=5,
+            conditions={'service_slug': service.slug},
+        )
+        regular_user = User.objects.create_user('req_user', password='pass')
+        cls.financing_request = FinancingRequest.objects.create(user=regular_user, service=service)
+
+    def _login(self):
+        self.client.login(username='admin2', password='pass')
+
+    def test_run_matching_creates_match_result(self):
+        self._login()
+        response = self.client.post(
+            reverse('fundzi-admin-request-match', args=[self.financing_request.pk]),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            MatchResult.objects.filter(request=self.financing_request, partner=self.partner).exists()
+        )
+
+    def test_get_matches_lists_results(self):
+        MatchResult.objects.get_or_create(
+            request=self.financing_request, partner=self.partner,
+            defaults={'score': 15, 'status': 'matched'},
+        )
+        self._login()
+        response = self.client.get(reverse('fundzi-admin-request-match', args=[self.financing_request.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(len(response.json()['results']), 1)
+
+    def test_assign_match_sets_status_assigned(self):
+        match, _ = MatchResult.objects.get_or_create(
+            request=self.financing_request, partner=self.partner,
+            defaults={'score': 15, 'status': 'matched'},
+        )
+        self._login()
+        response = self.client.post(
+            reverse('fundzi-admin-request-match-assign', args=[self.financing_request.pk, self.partner.pk]),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        match.refresh_from_db()
+        self.assertEqual(match.status, 'assigned')
+
+    def test_matching_rule_crud(self):
+        self._login()
+        # list
+        response = self.client.get(reverse('fundzi-admin-matching-rule-list'))
+        self.assertEqual(response.status_code, 200)
+        # create
+        response = self.client.post(
+            reverse('fundzi-admin-matching-rule-list'),
+            data=json.dumps({'partner_id': self.partner.pk, 'priority': 10, 'conditions': {}}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 201)
+        rule_id = response.json()['id']
+        # update
+        response = self.client.put(
+            reverse('fundzi-admin-matching-rule-detail', args=[rule_id]),
+            data=json.dumps({'priority': 20}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        # delete
+        response = self.client.delete(reverse('fundzi-admin-matching-rule-detail', args=[rule_id]))
+        self.assertEqual(response.status_code, 200)
+
+
+class ReportTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_fundzi', verbosity=0)
+        cls.admin = User.objects.create_superuser('admin3', password='pass')
+
+    def _login(self):
+        self.client.login(username='admin3', password='pass')
+
+    def test_funnel_report_returns_status_counts(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-admin-report-funnel'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('results', response.json())
+
+    def test_funnel_report_csv_export(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-admin-report-funnel') + '?format=csv')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/csv', response['Content-Type'])
+
+    def test_partner_performance_report(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-admin-report-partner-performance'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('results', response.json())
+
+    def test_monthly_report(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-admin-report-monthly'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('results', response.json())
+
+    def test_monthly_report_csv_export(self):
+        self._login()
+        response = self.client.get(reverse('fundzi-admin-report-monthly') + '?format=csv')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/csv', response['Content-Type'])
+
+    def test_reports_require_staff(self):
+        user = User.objects.create_user('plain_user', password='pass')
+        self.client.login(username='plain_user', password='pass')
+        for url_name in ['fundzi-admin-report-funnel', 'fundzi-admin-report-monthly', 'fundzi-admin-report-partner-performance']:
+            response = self.client.get(reverse(url_name))
+            self.assertEqual(response.status_code, 403, msg=url_name)
