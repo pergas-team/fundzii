@@ -1,14 +1,21 @@
 from django.urls import path
 
 from apps.fundzi.api.views import (
+    AdminMatchingRuleDetailView,
+    AdminMatchingRuleListView,
     AdminPartnerDetailView,
     AdminPartnerListView,
+    AdminReportFunnelView,
+    AdminReportMonthlyView,
+    AdminReportPartnerPerformanceView,
     AdminRequestArchiveView,
     AdminRequestAssignView,
     AdminRequestAttachmentDetailView,
     AdminRequestAttachmentListView,
     AdminRequestDetailView,
     AdminRequestListView,
+    AdminRequestMatchAssignView,
+    AdminRequestMatchView,
     AdminRequestNoteView,
     AdminRequestStatusView,
     AdminServiceContentDetailView,
@@ -32,6 +39,10 @@ from apps.fundzi.api.views import (
     NotificationReadAllView,
     NotificationReadView,
     NotificationUnreadCountView,
+    PartnerOfferCreateView,
+    PartnerOfferListView,
+    PartnerRequestDetailView,
+    PartnerRequestListView,
     PasswordLoginView,
     RequestDetailView,
     RequestHistoryView,
@@ -86,5 +97,19 @@ urlpatterns = [
     path('admin/users/<int:pk>/set-role/', AdminUserSetRoleView.as_view(), name='fundzi-admin-user-set-role'),
     path('admin/partners/', AdminPartnerListView.as_view(), name='fundzi-admin-partner-list'),
     path('admin/partners/<int:pk>/', AdminPartnerDetailView.as_view(), name='fundzi-admin-partner-detail'),
+    # 3.2 — Matching Engine
+    path('admin/matching-rules/', AdminMatchingRuleListView.as_view(), name='fundzi-admin-matching-rule-list'),
+    path('admin/matching-rules/<int:pk>/', AdminMatchingRuleDetailView.as_view(), name='fundzi-admin-matching-rule-detail'),
+    path('admin/requests/<int:pk>/matches/', AdminRequestMatchView.as_view(), name='fundzi-admin-request-match'),
+    path('admin/requests/<int:pk>/matches/<int:partner_id>/assign/', AdminRequestMatchAssignView.as_view(), name='fundzi-admin-request-match-assign'),
+    # 3.5 — Reports
+    path('admin/reports/funnel/', AdminReportFunnelView.as_view(), name='fundzi-admin-report-funnel'),
+    path('admin/reports/partner-performance/', AdminReportPartnerPerformanceView.as_view(), name='fundzi-admin-report-partner-performance'),
+    path('admin/reports/monthly/', AdminReportMonthlyView.as_view(), name='fundzi-admin-report-monthly'),
+    # 3.1 — Partner Portal
+    path('partner/requests/', PartnerRequestListView.as_view(), name='fundzi-partner-request-list'),
+    path('partner/requests/<int:pk>/', PartnerRequestDetailView.as_view(), name='fundzi-partner-request-detail'),
+    path('partner/requests/<int:pk>/offer/', PartnerOfferCreateView.as_view(), name='fundzi-partner-offer-create'),
+    path('partner/offers/', PartnerOfferListView.as_view(), name='fundzi-partner-offer-list'),
     path('health/', HealthCheckView.as_view(), name='fundzi-health'),
 ]
