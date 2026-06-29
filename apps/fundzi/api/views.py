@@ -35,6 +35,9 @@ from apps.fundzi.api.serializers import (
     ServiceDetailSerializer,
     ServiceListSerializer,
     UserAdminSerializer,
+    VendorApplicationSerializer,
+    VendorSerializer,
+    VendorServiceSerializer,
     VerifyOtpSerializer,
 )
 from apps.fundzi.models import (
@@ -50,6 +53,9 @@ from apps.fundzi.models import (
     PartnerOffer,
     RequestAttachment,
     ServiceContent,
+    Vendor,
+    VendorApplication,
+    VendorService,
     Workflow,
     WorkflowStep,
     decimal_from_payload,
@@ -1270,3 +1276,173 @@ class AdminReportMonthlyView(APIView):
             rows = [(r['month'], r['total_requests']) for r in results]
             return _csv_response('monthly.csv', ['ماه', 'تعداد درخواست'], rows)
         return Response({'results': results})
+
+
+# ── Vendor Ecosystem ──────────────────────────────────────────────────────────
+
+class DashboardView(APIView):
+    """Returns all data needed to render the user-facing dashboard in one call."""
+    permission_classes = []
+
+    def get(self, request):
+        investment_services = FinancialService.objects.filter(
+            is_active=True, dashboard_section='investment'
+        ).order_by('order')
+        financing_services = FinancialService.objects.filter(
+            is_active=True, dashboard_section='financing'
+        ).order_by('order')
+        vendor_services = (
+            VendorService.objects
+            .filter(is_active=True, vendor__is_active=True)
+            .select_related('vendor')
+            .order_by('vendor__order', 'order')
+        )
+        return Response({
+            'investment': ServiceListSerializer(investment_services, many=True).data,
+            'financing': ServiceListSerializer(financing_services, many=True).data,
+            'vendor_services': VendorServiceSerializer(vendor_services, many=True).data,
+        })
+
+
+class VendorListView(APIView):
+    permission_classes = []
+
+    def get(self, request):
+        vendor_type = request.query_params.get('type')
+        qs = Vendor.objects.filter(is_active=True).prefetch_related('services').order_by('order', 'name')
+        if vendor_type in ('financial', 'non_financial'):
+            qs = qs.filter(vendor_type=vendor_type)
+        return Response({'results': VendorSerializer(qs, many=True).data})
+
+
+class VendorDetailView(APIView):
+    permission_classes = []
+
+    def get(self, request, slug):
+        vendor = get_object_or_404(
+            Vendor.objects.prefetch_related('services'),
+            slug=slug, is_active=True,
+        )
+        return Response(VendorSerializer(vendor).data)
+
+
+class VendorServiceListView(APIView):
+    permission_classes = []
+
+    def get(self, request):
+        category = request.query_params.get('category')
+        vendor_type = request.query_params.get('vendor_type')
+        qs = (
+            VendorService.objects
+            .filter(is_active=True, vendor__is_active=True)
+            .select_related('vendor')
+            .order_by('vendor__order', 'order')
+        )
+        if category:
+            qs = qs.filter(category=category)
+        if vendor_type in ('financial', 'non_financial'):
+            qs = qs.filter(vendor__vendor_type=vendor_type)
+        return Response({'results': VendorServiceSerializer(qs, many=True).data})
+
+
+class VendorServiceApplyView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def post(self, request, slug):
+        vendor_service = get_object_or_404(VendorService, slug=slug, is_active=True, vendor__is_active=True)
+        financing_request_id = request.data.get('financing_request_id')
+        financing_request = None
+        if financing_request_id:
+            financing_request = get_object_or_404(
+                FinancingRequest, pk=financing_request_id, user=request.user
+            )
+        if VendorApplication.objects.filter(
+            user=request.user,
+            vendor_service=vendor_service,
+            status__in=('pending', 'under_review', 'awaiting_info'),
+        ).exists():
+            raise ValidationError({'detail': 'شما در حال حاضر یک درخواست فعال برای این سرویس دارید.'})
+        application = VendorApplication.objects.create(
+            user=request.user,
+            vendor_service=vendor_service,
+            financing_request=financing_request,
+            user_notes=request.data.get('user_notes', ''),
+        )
+        return Response(
+            VendorApplicationSerializer(application).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class UserVendorApplicationListView(APIView):
+    permission_classes = [IsAuthenticatedJSON]
+
+    def get(self, request):
+        qs = (
+            VendorApplication.objects
+            .filter(user=request.user)
+            .select_related('vendor_service', 'vendor_service__vendor')
+            .order_by('-submitted_at')
+        )
+        return Response({'results': VendorApplicationSerializer(qs, many=True).data})
+
+
+class AdminVendorApplicationListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request):
+        qs = (
+            VendorApplication.objects
+            .select_related('user', 'vendor_service', 'vendor_service__vendor')
+            .order_by('-submitted_at')
+        )
+        svc_slug = request.query_params.get('vendor_service')
+        app_status = request.query_params.get('status')
+        if svc_slug:
+            qs = qs.filter(vendor_service__slug=svc_slug)
+        if app_status:
+            qs = qs.filter(status=app_status)
+        return Response(paginate(request, qs, lambda a: VendorApplicationSerializer(a).data))
+
+    def patch(self, request, pk=None):
+        if pk is None:
+            raise ValidationError({'detail': 'pk required'})
+        application = get_object_or_404(VendorApplication, pk=pk)
+        new_status = request.data.get('status')
+        valid = [c[0] for c in VendorApplication.STATUS_CHOICES]
+        if new_status and new_status not in valid:
+            raise ValidationError({'status': 'وضعیت انتخاب‌شده معتبر نیست.'})
+        if new_status:
+            application.status = new_status
+        if 'vendor_notes' in request.data:
+            application.vendor_notes = request.data['vendor_notes']
+        if 'result_data' in request.data:
+            application.result_data = request.data['result_data']
+        application.save()
+        return Response(VendorApplicationSerializer(application).data)
+
+
+class AdminVendorListView(APIView):
+    permission_classes = [IsAdminOrOperator]
+
+    def get(self, request):
+        qs = Vendor.objects.prefetch_related('services').order_by('order', 'name')
+        return Response({'results': VendorSerializer(qs, many=True).data})
+
+    def post(self, request):
+        data = request.data
+        name = (data.get('name') or '').strip()
+        slug = (data.get('slug') or '').strip()
+        if not name or not slug:
+            raise ValidationError({'name': 'نام و slug الزامی است.'})
+        vendor = Vendor.objects.create(
+            name=name,
+            slug=slug,
+            description=data.get('description', ''),
+            vendor_type=data.get('vendor_type', 'non_financial'),
+            logo_url=data.get('logo_url', ''),
+            website=data.get('website', ''),
+            is_active=parse_bool(data.get('is_active'), True),
+            order=int(data.get('order') or 0),
+        )
+        return Response(VendorSerializer(vendor).data, status=status.HTTP_201_CREATED)

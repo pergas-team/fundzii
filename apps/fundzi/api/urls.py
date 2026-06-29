@@ -32,7 +32,10 @@ from apps.fundzi.api.views import (
     AdminUserDetailView,
     AdminUserListView,
     AdminUserSetRoleView,
+    AdminVendorApplicationListView,
+    AdminVendorListView,
     CurrentUserView,
+    DashboardView,
     HealthCheckView,
     LogoutView,
     NotificationListView,
@@ -52,27 +55,44 @@ from apps.fundzi.api.views import (
     ServiceFormView,
     ServiceListView,
     ServiceRequestCreateView,
+    UserVendorApplicationListView,
+    VendorDetailView,
+    VendorListView,
+    VendorServiceApplyView,
+    VendorServiceListView,
     VerifyOtpView,
 )
 
 
 urlpatterns = [
+    # ── Auth ──────────────────────────────────────────────────────────────────
     path('auth/send-otp/', SendOtpView.as_view(), name='fundzi-auth-send-otp'),
     path('auth/verify-otp/', VerifyOtpView.as_view(), name='fundzi-auth-verify-otp'),
     path('auth/login/', PasswordLoginView.as_view(), name='fundzi-auth-login'),
     path('auth/me/', CurrentUserView.as_view(), name='fundzi-auth-me'),
     path('auth/logout/', LogoutView.as_view(), name='fundzi-auth-logout'),
+    # ── Dashboard ─────────────────────────────────────────────────────────────
+    path('dashboard/', DashboardView.as_view(), name='fundzi-dashboard'),
+    # ── Services (public) ─────────────────────────────────────────────────────
     path('services/', ServiceListView.as_view(), name='fundzi-service-list'),
     path('services/<slug:slug>/', ServiceDetailView.as_view(), name='fundzi-service-detail'),
     path('services/<slug:slug>/form/', ServiceFormView.as_view(), name='fundzi-service-form'),
     path('services/<slug:slug>/requests/', ServiceRequestCreateView.as_view(), name='fundzi-service-request-create'),
+    # ── Vendor Ecosystem (public) ─────────────────────────────────────────────
+    path('vendors/', VendorListView.as_view(), name='fundzi-vendor-list'),
+    path('vendors/<slug:slug>/', VendorDetailView.as_view(), name='fundzi-vendor-detail'),
+    path('vendor-services/', VendorServiceListView.as_view(), name='fundzi-vendor-service-list'),
+    path('vendor-services/<slug:slug>/apply/', VendorServiceApplyView.as_view(), name='fundzi-vendor-service-apply'),
+    # ── User requests & notifications ─────────────────────────────────────────
     path('requests/', RequestListView.as_view(), name='fundzi-request-list'),
     path('requests/<int:pk>/', RequestDetailView.as_view(), name='fundzi-request-detail'),
     path('requests/<int:pk>/history/', RequestHistoryView.as_view(), name='fundzi-request-history'),
+    path('my-vendor-applications/', UserVendorApplicationListView.as_view(), name='fundzi-my-vendor-applications'),
     path('notifications/', NotificationListView.as_view(), name='fundzi-notification-list'),
     path('notifications/unread-count/', NotificationUnreadCountView.as_view(), name='fundzi-notification-unread-count'),
     path('notifications/read-all/', NotificationReadAllView.as_view(), name='fundzi-notification-read-all'),
     path('notifications/<int:pk>/read/', NotificationReadView.as_view(), name='fundzi-notification-read'),
+    # ── Admin ─────────────────────────────────────────────────────────────────
     path('admin/requests/', AdminRequestListView.as_view(), name='fundzi-admin-request-list'),
     path('admin/stats/', AdminStatsView.as_view(), name='fundzi-admin-stats'),
     path('admin/requests/<int:pk>/', AdminRequestDetailView.as_view(), name='fundzi-admin-request-detail'),
@@ -97,6 +117,10 @@ urlpatterns = [
     path('admin/users/<int:pk>/set-role/', AdminUserSetRoleView.as_view(), name='fundzi-admin-user-set-role'),
     path('admin/partners/', AdminPartnerListView.as_view(), name='fundzi-admin-partner-list'),
     path('admin/partners/<int:pk>/', AdminPartnerDetailView.as_view(), name='fundzi-admin-partner-detail'),
+    # Admin — Vendors
+    path('admin/vendors/', AdminVendorListView.as_view(), name='fundzi-admin-vendor-list'),
+    path('admin/vendor-applications/', AdminVendorApplicationListView.as_view(), name='fundzi-admin-vendor-application-list'),
+    path('admin/vendor-applications/<int:pk>/', AdminVendorApplicationListView.as_view(), name='fundzi-admin-vendor-application-detail'),
     # 3.2 — Matching Engine
     path('admin/matching-rules/', AdminMatchingRuleListView.as_view(), name='fundzi-admin-matching-rule-list'),
     path('admin/matching-rules/<int:pk>/', AdminMatchingRuleDetailView.as_view(), name='fundzi-admin-matching-rule-detail'),

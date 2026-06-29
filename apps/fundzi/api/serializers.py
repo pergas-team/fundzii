@@ -13,6 +13,9 @@ from apps.fundzi.models import (
     RequestAttachment,
     RequestHistory,
     ServiceContent,
+    Vendor,
+    VendorApplication,
+    VendorService,
     WorkflowStep,
 )
 
@@ -354,6 +357,47 @@ class FinancialPartnerSerializer(serializers.ModelSerializer):
             'is_active', 'description', 'created_at', 'updated_at',
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+
+# ── Vendor Ecosystem ──────────────────────────────────────────────────────────
+
+class VendorServiceSerializer(serializers.ModelSerializer):
+    vendor_name = serializers.CharField(source='vendor.name', read_only=True)
+    vendor_type = serializers.CharField(source='vendor.vendor_type', read_only=True)
+
+    class Meta:
+        model = VendorService
+        fields = [
+            'id', 'slug', 'title', 'description', 'category',
+            'vendor_name', 'vendor_type',
+            'price_display', 'duration_display', 'tags',
+            'is_active', 'order',
+        ]
+
+
+class VendorSerializer(serializers.ModelSerializer):
+    services = VendorServiceSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Vendor
+        fields = [
+            'id', 'slug', 'name', 'description', 'vendor_type',
+            'logo_url', 'website', 'is_active', 'order', 'services',
+        ]
+
+
+class VendorApplicationSerializer(serializers.ModelSerializer):
+    vendor_service_title = serializers.CharField(source='vendor_service.title', read_only=True)
+    vendor_name = serializers.CharField(source='vendor_service.vendor.name', read_only=True)
+
+    class Meta:
+        model = VendorApplication
+        fields = [
+            'id', 'vendor_service', 'vendor_service_title', 'vendor_name',
+            'financing_request', 'status', 'user_notes', 'vendor_notes',
+            'result_data', 'submitted_at', 'updated_at',
+        ]
+        read_only_fields = ['status', 'vendor_notes', 'result_data', 'submitted_at', 'updated_at']
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
