@@ -12,7 +12,12 @@ class FinancialService(models.Model):
     SERVICE_TYPES = (
         ('gold_backed', 'Gold-backed financing'),
         ('property_backed', 'Property-backed financing'),
+        ('crowdfunding', 'Crowdfunding'),
         ('other', 'Other'),
+    )
+    DASHBOARD_SECTIONS = (
+        ('investment', 'سرمایه‌گذاری'),
+        ('financing', 'تامین مالی'),
     )
 
     title = models.CharField(max_length=255, verbose_name='عنوان')
@@ -20,6 +25,10 @@ class FinancialService(models.Model):
     short_description = models.TextField(blank=True, verbose_name='توضیح کوتاه')
     full_description = models.TextField(blank=True, verbose_name='توضیح کامل')
     service_type = models.CharField(max_length=50, choices=SERVICE_TYPES, default='other')
+    dashboard_section = models.CharField(
+        max_length=30, choices=DASHBOARD_SECTIONS, default='financing',
+        verbose_name='بخش داشبورد',
+    )
     is_active = models.BooleanField(default=True, verbose_name='فعال')
     order = models.PositiveIntegerField(default=0, verbose_name='ترتیب')
     rules_config = models.JSONField(default=dict, blank=True, verbose_name='تنظیمات و قواعد')
@@ -504,6 +513,112 @@ class MatchResult(models.Model):
 
     def __str__(self):
         return f'{self.request} ↔ {self.partner} (score={self.score})'
+
+
+# ── Vendor Ecosystem ─────────────────────────────────────────────────────────
+
+class Vendor(models.Model):
+    VENDOR_TYPE_CHOICES = (
+        ('financial', 'مالی'),
+        ('non_financial', 'غیرمالی'),
+    )
+
+    name = models.CharField(max_length=255, verbose_name='نام')
+    slug = models.SlugField(max_length=120, unique=True)
+    description = models.TextField(blank=True, verbose_name='توضیحات')
+    vendor_type = models.CharField(max_length=30, choices=VENDOR_TYPE_CHOICES, verbose_name='نوع')
+    logo_url = models.URLField(blank=True, verbose_name='لوگو')
+    website = models.URLField(blank=True, verbose_name='وب‌سایت')
+    is_active = models.BooleanField(default=True, verbose_name='فعال')
+    order = models.PositiveIntegerField(default=0, verbose_name='ترتیب')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'وندور'
+        verbose_name_plural = 'وندورها'
+        ordering = ['order', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+class VendorService(models.Model):
+    CATEGORY_CHOICES = (
+        ('crowdfunding', 'تامین مالی جمعی'),
+        ('business_consulting', 'مشاوره کسب‌وکار'),
+        ('legal', 'خدمات حقوقی'),
+        ('credit_scoring', 'اعتبارسنجی و رتبه‌بندی'),
+        ('accounting', 'حسابداری و مالی'),
+        ('valuation', 'ارزیابی دارایی'),
+        ('other', 'سایر'),
+    )
+
+    vendor = models.ForeignKey(Vendor, related_name='services', on_delete=models.CASCADE)
+    title = models.CharField(max_length=255, verbose_name='عنوان')
+    slug = models.SlugField(max_length=120, unique=True)
+    description = models.TextField(blank=True, verbose_name='توضیحات')
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='other', verbose_name='دسته‌بندی')
+    is_active = models.BooleanField(default=True, verbose_name='فعال')
+    order = models.PositiveIntegerField(default=0, verbose_name='ترتیب')
+    price_display = models.CharField(max_length=100, blank=True, verbose_name='نمایش قیمت')
+    duration_display = models.CharField(max_length=100, blank=True, verbose_name='زمان تحویل')
+    tags = models.JSONField(default=list, blank=True, verbose_name='برچسب‌ها')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'سرویس وندور'
+        verbose_name_plural = 'سرویس‌های وندور'
+        ordering = ['order', 'title']
+
+    def __str__(self):
+        return f'{self.vendor.name} — {self.title}'
+
+
+class VendorApplication(models.Model):
+    STATUS_CHOICES = (
+        ('pending', 'در انتظار بررسی'),
+        ('under_review', 'در حال بررسی'),
+        ('awaiting_info', 'نیاز به اطلاعات بیشتر'),
+        ('approved', 'تأیید شده'),
+        ('rejected', 'رد شده'),
+        ('cancelled', 'لغو شده'),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='vendor_applications',
+        on_delete=models.CASCADE,
+    )
+    vendor_service = models.ForeignKey(
+        VendorService,
+        related_name='applications',
+        on_delete=models.CASCADE,
+    )
+    financing_request = models.ForeignKey(
+        FinancingRequest,
+        related_name='vendor_applications',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='pending')
+    user_notes = models.TextField(blank=True, verbose_name='توضیحات متقاضی')
+    vendor_notes = models.TextField(blank=True, verbose_name='یادداشت وندور')
+    result_data = models.JSONField(default=dict, blank=True, verbose_name='خروجی')
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'درخواست وندور'
+        verbose_name_plural = 'درخواست‌های وندور'
+        ordering = ['-submitted_at']
+
+    def __str__(self):
+        return f'{self.user} → {self.vendor_service}'
 
 
 def decimal_from_payload(value):
