@@ -382,6 +382,130 @@ class Notification(models.Model):
             self.save(update_fields=['is_read', 'read_at'])
 
 
+# ── Phase 3.1: Partner Portal ─────────────────────────────────────────────────
+
+class PartnerUser(models.Model):
+    ROLE_CHOICES = (
+        ('admin', 'Admin'),
+        ('analyst', 'Analyst'),
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='partner_memberships',
+        on_delete=models.CASCADE,
+    )
+    partner = models.ForeignKey(
+        FinancialPartner,
+        related_name='members',
+        on_delete=models.CASCADE,
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='analyst')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'partner')
+        verbose_name = 'کاربر همکار'
+        verbose_name_plural = 'کاربران همکار'
+
+    def __str__(self):
+        return f'{self.user} @ {self.partner} ({self.role})'
+
+
+class PartnerOffer(models.Model):
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('expired', 'Expired'),
+    )
+    request = models.ForeignKey(
+        FinancingRequest,
+        related_name='partner_offers',
+        on_delete=models.CASCADE,
+    )
+    partner = models.ForeignKey(
+        FinancialPartner,
+        related_name='offers',
+        on_delete=models.CASCADE,
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='submitted_offers',
+        on_delete=models.SET_NULL,
+        null=True,
+    )
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    interest_rate = models.DecimalField(max_digits=5, decimal_places=2)
+    duration_months = models.PositiveIntegerField()
+    conditions = models.TextField(blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'پیشنهاد همکار'
+        verbose_name_plural = 'پیشنهادهای همکار'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.partner} → {self.request} ({self.status})'
+
+
+# ── Phase 3.2: Matching Engine ────────────────────────────────────────────────
+
+class MatchingRule(models.Model):
+    partner = models.ForeignKey(
+        FinancialPartner,
+        related_name='matching_rules',
+        on_delete=models.CASCADE,
+    )
+    priority = models.PositiveIntegerField(default=0)
+    # Supported keys: service_slug, min_amount, max_amount
+    conditions = models.JSONField(default=dict)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-priority']
+        verbose_name = 'قانون تطبیق'
+        verbose_name_plural = 'قوانین تطبیق'
+
+    def __str__(self):
+        return f'{self.partner} — priority {self.priority}'
+
+
+class MatchResult(models.Model):
+    STATUS_CHOICES = (
+        ('matched', 'Matched'),
+        ('assigned', 'Assigned'),
+        ('rejected', 'Rejected'),
+    )
+    request = models.ForeignKey(
+        FinancingRequest,
+        related_name='match_results',
+        on_delete=models.CASCADE,
+    )
+    partner = models.ForeignKey(
+        FinancialPartner,
+        related_name='match_results',
+        on_delete=models.CASCADE,
+    )
+    score = models.PositiveIntegerField(default=0)
+    matched_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='matched')
+    assigned_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('request', 'partner')
+        ordering = ['-score']
+        verbose_name = 'نتیجه تطبیق'
+        verbose_name_plural = 'نتایج تطبیق'
+
+    def __str__(self):
+        return f'{self.request} ↔ {self.partner} (score={self.score})'
+
+
 def decimal_from_payload(value):
     if value in (None, ''):
         return None
