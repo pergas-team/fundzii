@@ -7,6 +7,7 @@ import { LogOut, Menu, ShieldCheck, UserRound, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { NotificationBell } from "@/components/layout/NotificationBell";
 
 type NavLink = { href: string; label: string };
 
@@ -62,6 +63,7 @@ export function AppHeader() {
         <div className="flex items-center gap-2">
           {user ? (
             <div className="flex items-center gap-2.5">
+              <NotificationBell />
               <span className="grid h-9 w-9 place-items-center rounded-full bg-secondary text-sm font-bold text-secondary-foreground">
                 {initials}
               </span>

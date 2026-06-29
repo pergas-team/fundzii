@@ -7,7 +7,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from apps.fundzi.models import FinancialService, FinancingRequest, InternalNote, WorkflowStep
+from apps.fundzi.models import FinancialService, FinancingRequest, InternalNote, Notification, WorkflowStep
 
 
 class FundziAPITests(TestCase):
@@ -278,3 +278,84 @@ class FundziAPITests(TestCase):
         self.assertContains(detail_response, 'شروع درخواست')
         self.assertContains(form_response, 'gold_weight_grams')
         self.assertEqual(dashboard_response.status_code, 200)
+
+
+class FundziNotificationTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_fundzi')
+        cls.user = User.objects.create_user(username='09120000000', password='pass')
+        cls.admin = User.objects.create_user(username='admin', password='pass', is_staff=True)
+
+    def _submit_request(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['gold-backed-financing']),
+            data=json.dumps({
+                'gold_type': 'سکه',
+                'gold_weight_grams': '25',
+                'requested_amount': '100000000',
+                'desired_duration_months': 12,
+                'city': 'تهران',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 201)
+        return FinancingRequest.objects.get(id=response.json()['id'])
+
+    def test_submission_creates_in_app_notification(self):
+        request = self._submit_request()
+        notifications = Notification.objects.filter(user=self.user, channel='in_app')
+        self.assertEqual(notifications.count(), 1)
+        notification = notifications.get()
+        self.assertEqual(notification.kind, 'request_submitted')
+        self.assertIn(request.tracking_code, notification.body)
+        self.assertFalse(notification.is_read)
+
+    def test_status_change_creates_localized_notification(self):
+        request = self._submit_request()
+        step = WorkflowStep.objects.get(workflow=request.service.workflow, key='approved')
+        request.change_status(step, changed_by=self.admin)
+
+        notification = Notification.objects.filter(
+            user=self.user, channel='in_app', kind='status_changed'
+        ).latest('created_at')
+        self.assertIn('تأیید شده', notification.body)
+
+    def test_notification_list_and_unread_count(self):
+        self._submit_request()
+        response = self.client.get(reverse('fundzi-notification-list'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['count'], 1)
+        self.assertEqual(data['unread_count'], 1)
+
+    def test_mark_notification_read(self):
+        self._submit_request()
+        notification = Notification.objects.filter(user=self.user, channel='in_app').get()
+        response = self.client.post(reverse('fundzi-notification-read', args=[notification.id]))
+        self.assertEqual(response.status_code, 200)
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)
+
+    def test_mark_all_read(self):
+        request = self._submit_request()
+        step = WorkflowStep.objects.get(workflow=request.service.workflow, key='initial_review')
+        request.change_status(step, changed_by=self.admin)
+        self.assertEqual(Notification.objects.filter(user=self.user, is_read=False).count(), 2)
+
+        response = self.client.post(reverse('fundzi-notification-read-all'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Notification.objects.filter(user=self.user, is_read=False).count(), 0)
+
+    def test_user_cannot_read_other_users_notification(self):
+        self._submit_request()
+        notification = Notification.objects.filter(user=self.user, channel='in_app').get()
+        self.client.logout()
+        self.client.login(username='admin', password='pass')
+        response = self.client.post(reverse('fundzi-notification-read', args=[notification.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_notifications_require_login(self):
+        response = self.client.get(reverse('fundzi-notification-list'))
+        self.assertEqual(response.status_code, 401)

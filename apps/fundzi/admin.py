@@ -7,6 +7,7 @@ from apps.fundzi.models import (
     FinancingRequest,
     FormField,
     InternalNote,
+    Notification,
     RequestAttachment,
     RequestFieldValue,
     RequestHistory,
@@ -177,3 +178,11 @@ class FinancialPartnerAdmin(admin.ModelAdmin):
     list_display = ('name', 'type', 'min_amount', 'max_amount', 'is_active')
     list_filter = ('type', 'is_active')
     search_fields = ('name', 'description')
+
+
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display = ('user', 'kind', 'channel', 'title', 'status', 'is_read', 'created_at')
+    list_filter = ('kind', 'channel', 'status', 'is_read')
+    search_fields = ('user__username', 'title', 'body')
+    readonly_fields = ('created_at', 'sent_at', 'read_at')

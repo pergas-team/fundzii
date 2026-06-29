@@ -24,6 +24,7 @@ from apps.fundzi.models import (
     FinancingRequest,
     FormField,
     InternalNote,
+    Notification,
     RequestAttachment,
     ServiceContent,
     Workflow,
@@ -1183,3 +1184,58 @@ class AdminPartnerDetailView(View):
         partner = get_object_or_404(FinancialPartner, pk=pk)
         partner.delete()
         return JsonResponse({'detail': 'همکار مالی حذف شد.'})
+
+
+def notification_payload(instance):
+    return {
+        'id': instance.id,
+        'kind': instance.kind,
+        'channel': instance.channel,
+        'title': instance.title,
+        'body': instance.body,
+        'is_read': instance.is_read,
+        'request_id': instance.request_id,
+        'tracking_code': instance.request.tracking_code if instance.request else None,
+        'created_at': instance.created_at.isoformat(),
+    }
+
+
+@method_decorator(api_login_required, name='dispatch')
+class NotificationListView(View):
+    def get(self, request):
+        queryset = Notification.objects.filter(user=request.user, channel='in_app').select_related('request')
+        if parse_bool(request.GET.get('unread'), False):
+            queryset = queryset.filter(is_read=False)
+        payload, error = paginate_payload(request, queryset, notification_payload)
+        if error:
+            return error
+        payload['unread_count'] = Notification.objects.filter(
+            user=request.user, channel='in_app', is_read=False
+        ).count()
+        return JsonResponse(payload)
+
+
+@method_decorator(api_login_required, name='dispatch')
+class NotificationUnreadCountView(View):
+    def get(self, request):
+        count = Notification.objects.filter(user=request.user, channel='in_app', is_read=False).count()
+        return JsonResponse({'unread_count': count})
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_login_required, name='dispatch')
+class NotificationReadView(View):
+    def post(self, request, pk):
+        notification = get_object_or_404(Notification, pk=pk, user=request.user)
+        notification.mark_read()
+        return JsonResponse(notification_payload(notification))
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(api_login_required, name='dispatch')
+class NotificationReadAllView(View):
+    def post(self, request):
+        updated = Notification.objects.filter(
+            user=request.user, channel='in_app', is_read=False
+        ).update(is_read=True, read_at=timezone.now())
+        return JsonResponse({'detail': 'همه اعلان‌ها خوانده شد.', 'updated': updated})

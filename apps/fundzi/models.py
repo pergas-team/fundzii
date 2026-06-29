@@ -328,6 +328,60 @@ class FinancialPartner(models.Model):
         return self.name
 
 
+class Notification(models.Model):
+    KIND_CHOICES = (
+        ('request_submitted', 'Request submitted'),
+        ('status_changed', 'Status changed'),
+        ('general', 'General'),
+    )
+    CHANNEL_CHOICES = (
+        ('in_app', 'In-app'),
+        ('sms', 'SMS'),
+        ('email', 'Email'),
+    )
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+    )
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='fundzi_notifications', on_delete=models.CASCADE)
+    request = models.ForeignKey(
+        FinancingRequest,
+        related_name='notifications',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    kind = models.CharField(max_length=40, choices=KIND_CHOICES, default='general')
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES, default='in_app')
+    title = models.CharField(max_length=255)
+    body = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='sent')
+    is_read = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'اعلان'
+        verbose_name_plural = 'اعلان‌ها'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_read']),
+        ]
+
+    def __str__(self):
+        return f'{self.user} - {self.title}'
+
+    def mark_read(self):
+        if not self.is_read:
+            self.is_read = True
+            self.read_at = timezone.now()
+            self.save(update_fields=['is_read', 'read_at'])
+
+
 def decimal_from_payload(value):
     if value in (None, ''):
         return None
