@@ -26,6 +26,7 @@ from apps.fundzi.api.views import (
     AdminUserListView,
     AdminUserSetRoleView,
     CurrentUserView,
+    HealthCheckView,
     LogoutView,
     NotificationListView,
     NotificationReadAllView,
@@ -85,4 +86,5 @@ urlpatterns = [
     path('admin/users/<int:pk>/set-role/', AdminUserSetRoleView.as_view(), name='fundzi-admin-user-set-role'),
     path('admin/partners/', AdminPartnerListView.as_view(), name='fundzi-admin-partner-list'),
     path('admin/partners/<int:pk>/', AdminPartnerDetailView.as_view(), name='fundzi-admin-partner-detail'),
+    path('health/', HealthCheckView.as_view(), name='fundzi-health'),
 ]

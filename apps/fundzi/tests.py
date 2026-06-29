@@ -359,3 +359,12 @@ class FundziNotificationTests(TestCase):
     def test_notifications_require_login(self):
         response = self.client.get(reverse('fundzi-notification-list'))
         self.assertEqual(response.status_code, 401)
+
+
+class HealthCheckTests(TestCase):
+    def test_health_endpoint_returns_200_with_db_ok(self):
+        response = self.client.get(reverse('fundzi-health'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['status'], 'ok')
+        self.assertTrue(data['db'])
