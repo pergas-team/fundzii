@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import timedelta
 from functools import wraps
 
@@ -374,7 +375,17 @@ class SendOtpView(View):
         phone_number = payload.get('phone_number') or payload.get('username')
         if not phone_number:
             return error_response({'phone_number': 'شماره موبایل الزامی است.'})
-        return JsonResponse({'detail': 'کد ورود ارسال شد.', 'demo_code': '123456'})
+
+        from apps.fundzi.otp_backend import OTP_TTL_SECONDS, generate_otp, send_otp
+        code = generate_otp()
+        request.session['_otp_code'] = code
+        request.session['_otp_phone'] = phone_number
+        request.session['_otp_expires'] = time.time() + OTP_TTL_SECONDS
+
+        sent = send_otp(phone_number, code)
+        if not sent:
+            return error_response({'detail': 'ارسال کد ورود ناموفق بود. لطفاً دوباره تلاش کنید.'}, status=503)
+        return JsonResponse({'detail': 'کد ورود ارسال شد.'})
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -391,8 +402,17 @@ class VerifyOtpView(View):
         if getattr(settings, 'FUNDZI_OTP_ENABLED', True):
             if not otp_code:
                 return error_response({'otp_code': 'کد ورود الزامی است.'})
-            if otp_code != '123456':
+            stored_code = request.session.get('_otp_code')
+            stored_phone = request.session.get('_otp_phone')
+            expires = request.session.get('_otp_expires', 0)
+            if stored_phone != phone_number or not stored_code:
+                return error_response({'otp_code': 'ابتدا درخواست ارسال کد کنید.'})
+            if time.time() > expires:
+                return error_response({'otp_code': 'کد ورود منقضی شده است. لطفاً کد جدید دریافت کنید.'})
+            if otp_code != stored_code:
                 return error_response({'otp_code': 'کد وارد شده معتبر نیست.'})
+            for key in ('_otp_code', '_otp_phone', '_otp_expires'):
+                request.session.pop(key, None)
         User = get_user_model()
         user, _ = User.objects.get_or_create(username=phone_number, defaults={'first_name': ''})
         user.backend = 'django.contrib.auth.backends.ModelBackend'
@@ -1239,3 +1259,15 @@ class NotificationReadAllView(View):
             user=request.user, channel='in_app', is_read=False
         ).update(is_read=True, read_at=timezone.now())
         return JsonResponse({'detail': 'همه اعلان‌ها خوانده شد.', 'updated': updated})
+
+
+class HealthCheckView(View):
+    def get(self, request):
+        from django.db import connection
+        try:
+            connection.ensure_connection()
+            db_ok = True
+        except Exception:
+            db_ok = False
+        status = 200 if db_ok else 503
+        return JsonResponse({'status': 'ok' if db_ok else 'error', 'db': db_ok}, status=status)
