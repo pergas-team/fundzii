@@ -127,6 +127,12 @@ LOGOUT_REDIRECT_URL = 'fundzi-home'
 # in with just their phone number and the entered code is ignored.
 FUNDZI_OTP_ENABLED = False
 
+# External notification channels. In-app notifications are always created; these
+# flags gate SMS/email dispatch on status changes. Keep False until a real
+# provider is wired (see apps/fundzi/notifications.py).
+FUNDZI_SMS_NOTIFICATIONS_ENABLED = False
+FUNDZI_EMAIL_NOTIFICATIONS_ENABLED = False
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
