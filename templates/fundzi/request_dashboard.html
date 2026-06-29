@@ -1,0 +1,37 @@
+{% extends "fundzi/base.html" %}
+
+{% block title %}درخواست‌های من{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>درخواست‌های من</h1>
+    <p class="muted">وضعیت درخواست‌های ثبت‌شده خود را از این بخش پیگیری کنید.</p>
+</section>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>کد پیگیری</th>
+                <th>سرویس</th>
+                <th>وضعیت</th>
+                <th>تاریخ ثبت</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in requests %}
+                <tr>
+                    <td>{{ item.tracking_code }}</td>
+                    <td>{{ item.service.title }}</td>
+                    <td><span class="badge">{{ item.current_workflow_step.title|default:item.current_status }}</span></td>
+                    <td>{{ item.submitted_at|date:"Y-m-d H:i" }}</td>
+                    <td><a href="{% url 'fundzi-request-page' item.pk %}">جزئیات</a></td>
+                </tr>
+            {% empty %}
+                <tr><td colspan="5">هنوز درخواستی ثبت نکرده‌اید.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

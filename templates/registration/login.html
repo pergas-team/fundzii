@@ -1,0 +1,26 @@
+{% extends "fundzi/base.html" %}
+
+{% block title %}ورود{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>ورود به فاندزی</h1>
+    <p class="muted">برای ثبت و پیگیری درخواست وارد حساب کاربری شوید.</p>
+</section>
+
+<form class="card" method="post">
+    {% csrf_token %}
+    {% if form.errors %}
+        <div class="error">نام کاربری یا رمز عبور معتبر نیست.</div>
+    {% endif %}
+    <div class="field">
+        <label for="{{ form.username.id_for_label }}">نام کاربری یا شماره موبایل</label>
+        {{ form.username }}
+    </div>
+    <div class="field">
+        <label for="{{ form.password.id_for_label }}">رمز عبور</label>
+        {{ form.password }}
+    </div>
+    <button class="button" type="submit">ورود</button>
+</form>
+{% endblock %}

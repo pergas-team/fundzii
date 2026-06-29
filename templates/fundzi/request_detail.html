@@ -1,0 +1,46 @@
+{% extends "fundzi/base.html" %}
+
+{% block title %}درخواست {{ request_obj.tracking_code }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>درخواست {{ request_obj.tracking_code }}</h1>
+    <p class="muted">{{ request_obj.service.title }}</p>
+    <p><span class="badge">{{ request_obj.current_workflow_step.title|default:request_obj.current_status }}</span></p>
+</section>
+
+<section class="grid">
+    <article class="card">
+        <h2>اطلاعات ثبت‌شده</h2>
+        {% for value in field_values %}
+            <p>
+                <strong>{{ value.field.label }}:</strong>
+                {% if value.file %}
+                    <a href="{{ value.file.url }}">مشاهده فایل</a>
+                {% elif value.value_json != None %}
+                    {{ value.value_json }}
+                {% elif value.value_number != None %}
+                    {{ value.value_number }}
+                {% else %}
+                    {{ value.value_text|default:"-" }}
+                {% endif %}
+            </p>
+        {% empty %}
+            <p>مقداری ثبت نشده است.</p>
+        {% endfor %}
+    </article>
+
+    <article class="card">
+        <h2>تاریخچه وضعیت</h2>
+        {% for item in history %}
+            <p>
+                <strong>{{ item.to_status }}</strong>
+                <br>
+                <span class="muted">{{ item.created_at|date:"Y-m-d H:i" }}{% if item.note %} - {{ item.note }}{% endif %}</span>
+            </p>
+        {% empty %}
+            <p>تاریخچه‌ای ثبت نشده است.</p>
+        {% endfor %}
+    </article>
+</section>
+{% endblock %}

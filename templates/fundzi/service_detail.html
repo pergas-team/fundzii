@@ -1,0 +1,22 @@
+{% extends "fundzi/base.html" %}
+
+{% block title %}{{ service.title }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>{{ service.title }}</h1>
+    <p class="muted">{{ service.full_description }}</p>
+    <a class="button" href="{% url 'fundzi-request-create-page' service.slug %}">شروع درخواست</a>
+</section>
+
+<section class="stack">
+    {% for content in contents %}
+        <article class="card">
+            <h2>{{ content.title }}</h2>
+            <p>{{ content.body }}</p>
+        </article>
+    {% empty %}
+        <article class="card">محتوایی برای این سرویس ثبت نشده است.</article>
+    {% endfor %}
+</section>
+{% endblock %}

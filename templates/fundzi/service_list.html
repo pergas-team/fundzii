@@ -1,0 +1,22 @@
+{% extends "fundzi/base.html" %}
+
+{% block title %}سرویس‌های فاندزی{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>سرویس‌های تأمین مالی</h1>
+    <p class="muted">سرویس مناسب را انتخاب کنید، شرایط را بخوانید و درخواست خود را ثبت کنید.</p>
+</section>
+
+<section class="grid">
+    {% for service in services %}
+        <article class="card">
+            <h2>{{ service.title }}</h2>
+            <p class="muted">{{ service.short_description }}</p>
+            <a class="button secondary" href="{% url 'fundzi-service-page' service.slug %}">مشاهده سرویس</a>
+        </article>
+    {% empty %}
+        <div class="card">در حال حاضر سرویس فعالی وجود ندارد.</div>
+    {% endfor %}
+</section>
+{% endblock %}

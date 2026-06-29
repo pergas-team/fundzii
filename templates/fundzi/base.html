@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}فاندزی{% endblock %}</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f7f8fa;
+            --surface: #ffffff;
+            --text: #1f2933;
+            --muted: #64748b;
+            --line: #d8dee8;
+            --accent: #1f7a5f;
+            --accent-dark: #145642;
+            --danger: #b42318;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: Tahoma, Arial, sans-serif;
+            line-height: 1.8;
+        }
+        a { color: var(--accent-dark); text-decoration: none; }
+        .shell { width: min(1040px, calc(100% - 32px)); margin: 0 auto; }
+        header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--line);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; }
+        .brand { font-weight: 700; font-size: 20px; }
+        .nav-links { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 14px; }
+        main { padding: 28px 0 56px; }
+        .page-head { margin-bottom: 20px; }
+        h1, h2, h3 { line-height: 1.5; margin: 0 0 10px; }
+        p { margin: 0 0 12px; }
+        .muted { color: var(--muted); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .stack { display: grid; gap: 14px; }
+        .button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 42px;
+            padding: 8px 16px;
+            border: 1px solid var(--accent);
+            border-radius: 6px;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .button.secondary { background: var(--surface); color: var(--accent-dark); }
+        .field { display: grid; gap: 6px; margin-bottom: 14px; }
+        label { font-weight: 700; }
+        input, select, textarea {
+            width: 100%;
+            min-height: 42px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #fff;
+            color: var(--text);
+            padding: 8px 10px;
+            font: inherit;
+        }
+        textarea { min-height: 110px; resize: vertical; }
+        .error { color: var(--danger); font-size: 14px; }
+        .messages { display: grid; gap: 8px; margin-bottom: 16px; }
+        .message { background: #eaf6f1; border: 1px solid #b8dfd1; border-radius: 6px; padding: 10px 12px; }
+        .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; min-width: 680px; }
+        th, td { text-align: right; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+        th { color: var(--muted); font-size: 13px; }
+        .badge { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #eaf1f8; color: #24455f; font-size: 13px; }
+        @media (max-width: 640px) {
+            .nav { align-items: flex-start; flex-direction: column; }
+            main { padding-top: 18px; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div class="shell nav">
+        <a class="brand" href="{% url 'fundzi-home' %}">فاندزی</a>
+        <nav class="nav-links">
+            <a href="{% url 'fundzi-home' %}">سرویس‌ها</a>
+            {% if user.is_authenticated %}
+                <a href="{% url 'fundzi-dashboard-page' %}">درخواست‌های من</a>
+                <a href="{% url 'logout' %}">خروج</a>
+            {% else %}
+                <a href="{% url 'login' %}">ورود</a>
+            {% endif %}
+            {% if user.is_staff %}<a href="{% url 'admin:index' %}">مدیریت</a>{% endif %}
+        </nav>
+    </div>
+</header>
+<main>
+    <div class="shell">
+        {% if messages %}
+            <div class="messages">
+                {% for message in messages %}<div class="message">{{ message }}</div>{% endfor %}
+            </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+    </div>
+</main>
+</body>
+</html>

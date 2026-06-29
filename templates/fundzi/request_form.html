@@ -1,0 +1,54 @@
+{% extends "fundzi/base.html" %}
+{% load fundzi_extras %}
+
+{% block title %}ثبت درخواست {{ service.title }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>ثبت درخواست {{ service.title }}</h1>
+    <p class="muted">{{ form.description }}</p>
+</section>
+
+<form class="card" method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    {% for field in fields %}
+        <div class="field">
+            <label for="id_{{ field.key }}">
+                {{ field.label }}{% if field.required %} *{% endif %}
+            </label>
+            {% if field.field_type == "textarea" %}
+                <textarea id="id_{{ field.key }}" name="{{ field.key }}" placeholder="{{ field.placeholder }}">{{ form_data|get_item:field.key }}</textarea>
+            {% elif field.field_type == "select" %}
+                <select id="id_{{ field.key }}" name="{{ field.key }}">
+                    <option value="">انتخاب کنید</option>
+                    {% for option in field.options %}
+                        <option value="{{ option }}" {% if form_data|get_item:field.key == option|stringformat:"s" %}selected{% endif %}>{{ option }}</option>
+                    {% endfor %}
+                </select>
+            {% elif field.field_type == "boolean" %}
+                <select id="id_{{ field.key }}" name="{{ field.key }}">
+                    <option value="">انتخاب کنید</option>
+                    <option value="true" {% if form_data|get_item:field.key == "true" %}selected{% endif %}>بله</option>
+                    <option value="false" {% if form_data|get_item:field.key == "false" %}selected{% endif %}>خیر</option>
+                </select>
+            {% elif field.field_type == "file" %}
+                <input id="id_{{ field.key }}" name="{{ field.key }}" type="file">
+            {% elif field.field_type == "number" or field.field_type == "money" or field.field_type == "percentage" %}
+                <input id="id_{{ field.key }}" name="{{ field.key }}" type="number" step="any" value="{{ form_data|get_item:field.key }}" placeholder="{{ field.placeholder }}">
+            {% elif field.field_type == "date" %}
+                <input id="id_{{ field.key }}" name="{{ field.key }}" type="date" value="{{ form_data|get_item:field.key }}">
+            {% else %}
+                <input id="id_{{ field.key }}" name="{{ field.key }}" type="text" value="{{ form_data|get_item:field.key }}" placeholder="{{ field.placeholder }}">
+            {% endif %}
+            {% if field.help_text %}<small class="muted">{{ field.help_text }}</small>{% endif %}
+            {% if field_errors|get_item:field.key %}
+                <div class="error">{{ field_errors|get_item:field.key|join:", " }}</div>
+            {% endif %}
+        </div>
+    {% endfor %}
+    {% if field_errors|get_item:"__all__" %}
+        <div class="error">{{ field_errors|get_item:"__all__"|join:", " }}</div>
+    {% endif %}
+    <button class="button" type="submit">ثبت درخواست</button>
+</form>
+{% endblock %}

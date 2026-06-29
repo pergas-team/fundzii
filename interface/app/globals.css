@@ -1,0 +1,162 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 216 68% 22%;
+    --primary-foreground: 0 0% 100%;
+    --primary-light: 215 55% 34%;
+
+    --secondary: 214 32% 95%;
+    --secondary-foreground: 222 47% 18%;
+
+    --muted: 214 30% 95%;
+    --muted-foreground: 215 18% 47%;
+
+    --accent: 41 96% 53%;
+    --accent-foreground: 28 70% 16%;
+
+    --success: 152 58% 38%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 28 70% 16%;
+
+    --info: 209 76% 46%;
+    --info-foreground: 0 0% 100%;
+
+    --destructive: 4 74% 49%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 25% 89%;
+    --input: 214 25% 88%;
+    --ring: 41 96% 53%;
+
+    --radius: 0.85rem;
+  }
+
+  .dark {
+    --background: 222 47% 8%;
+    --foreground: 210 30% 96%;
+
+    --card: 222 40% 12%;
+    --card-foreground: 210 30% 96%;
+
+    --popover: 222 40% 12%;
+    --popover-foreground: 210 30% 96%;
+
+    --primary: 210 60% 56%;
+    --primary-foreground: 222 47% 9%;
+    --primary-light: 210 60% 64%;
+
+    --secondary: 217 33% 18%;
+    --secondary-foreground: 210 30% 92%;
+
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 41 96% 56%;
+    --accent-foreground: 28 70% 14%;
+
+    --border: 217 33% 20%;
+    --input: 217 33% 22%;
+    --ring: 41 96% 56%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    direction: rtl;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  ::selection {
+    background-color: hsl(var(--accent) / 0.35);
+  }
+
+  /* Refined scrollbar */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.5);
+  }
+}
+
+@layer components {
+  .text-gradient {
+    @apply bg-gradient-to-l from-primary to-primary-light bg-clip-text text-transparent;
+  }
+
+  /* Frosted-glass surface for sticky header / overlays */
+  .glass {
+    background-color: hsl(var(--card) / 0.72);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    backdrop-filter: blur(14px) saturate(160%);
+  }
+
+  /* Subtle dotted backdrop used behind hero sections */
+  .bg-dotted {
+    background-image: radial-gradient(hsl(var(--primary-foreground) / 0.14) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  /* Rendered / editable rich-text content (HTML from the content editor) */
+  .prose-content {
+    @apply text-sm leading-7 text-muted-foreground;
+  }
+  .prose-content :where(h1, h2, h3, h4) {
+    @apply font-bold text-foreground;
+  }
+  .prose-content h2 {
+    @apply mb-2 mt-4 text-lg;
+  }
+  .prose-content h3 {
+    @apply mb-1.5 mt-3 text-base;
+  }
+  .prose-content p {
+    @apply my-2;
+  }
+  .prose-content ul {
+    @apply my-2 list-disc space-y-1 pr-5;
+  }
+  .prose-content ol {
+    @apply my-2 list-decimal space-y-1 pr-5;
+  }
+  .prose-content a {
+    @apply font-medium text-primary underline underline-offset-4;
+  }
+  .prose-content blockquote {
+    @apply my-3 border-r-4 border-accent bg-muted/50 px-4 py-2 text-foreground;
+  }
+  .prose-content strong {
+    @apply font-bold text-foreground;
+  }
+}
