@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { FinancialService, ServiceContent } from "@/types/service";
+import { PublicP2PSection } from "./PublicP2PSection";
 
 // ── Icon / colour maps ────────────────────────────────────────────────────────
 
@@ -33,6 +34,8 @@ const SLUG_SECTION: Record<string, "investment" | "financing"> = {
   "private-financing": "financing",
   "private-investment": "investment",
 };
+
+const P2P_SLUGS = new Set(["private-investment", "private-financing"]);
 
 const PALETTE = {
   investment: {
@@ -294,6 +297,11 @@ export function ServiceDetail({ service }: { service: FinancialService }) {
           <Documents items={docs} />
         </div>
       </div>
+
+      {/* P2P public marketplace — only for private-investment / private-financing */}
+      {P2P_SLUGS.has(service.slug) && (
+        <PublicP2PSection slug={service.slug} section={section} />
+      )}
     </div>
   );
 }

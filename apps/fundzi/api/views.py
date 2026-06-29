@@ -274,6 +274,61 @@ class ServiceFormView(APIView):
         return Response(FormSchemaSerializer().to_representation(form))
 
 
+# Fields that must never appear in the public P2P listing
+_P2P_PRIVATE_KEYS = frozenset({
+    'full_name', 'national_id', 'phone',
+    'collateral_documents',
+    'monthly_income', 'credit_history',
+    'additional_info', 'additional_conditions', 'collateral_notes',
+})
+
+
+class PublicP2PRequestListView(APIView):
+    """Public listing of admin-approved P2P requests for a service.
+
+    Only services with rules_config.p2p=true are served.
+    Only requests in 'matching' status appear (identity + collateral verified by admin).
+    Personal fields are stripped server-side.
+    """
+    permission_classes = []
+
+    def get(self, request, slug):
+        service = get_object_or_404(FinancialService, slug=slug, is_active=True)
+        if not service.rules_config.get('p2p'):
+            return Response({'count': 0, 'results': []})
+
+        qs = (
+            FinancingRequest.objects
+            .filter(service=service, current_status='matching', is_archived=False)
+            .prefetch_related('field_values__field')
+            .order_by('-submitted_at')
+        )
+
+        results = []
+        for req in qs:
+            fields = {}
+            for fv in req.field_values.select_related('field'):
+                key = fv.field.key
+                if key in _P2P_PRIVATE_KEYS:
+                    continue
+                val = fv.value
+                if val not in (None, '', []):
+                    fields[key] = {
+                        'label': fv.field.label,
+                        'value': val,
+                        'type': fv.field.field_type,
+                    }
+            results.append({
+                'id': req.id,
+                'ref': f'#{req.tracking_code[-4:]}' if req.tracking_code else f'#{req.pk}',
+                'current_status': req.current_status,
+                'submitted_at': req.submitted_at.isoformat(),
+                'fields': fields,
+            })
+
+        return Response({'count': len(results), 'results': results})
+
+
 # ── User request views ────────────────────────────────────────────────────────
 
 class ServiceRequestCreateView(APIView):

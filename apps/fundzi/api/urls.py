@@ -3,6 +3,7 @@ from django.urls import path
 from apps.fundzi.api.views import (
     AdminMatchingRuleDetailView,
     AdminMatchingRuleListView,
+    PublicP2PRequestListView,
     AdminPartnerDetailView,
     AdminPartnerListView,
     AdminReportFunnelView,
@@ -78,6 +79,7 @@ urlpatterns = [
     path('services/<slug:slug>/', ServiceDetailView.as_view(), name='fundzi-service-detail'),
     path('services/<slug:slug>/form/', ServiceFormView.as_view(), name='fundzi-service-form'),
     path('services/<slug:slug>/requests/', ServiceRequestCreateView.as_view(), name='fundzi-service-request-create'),
+    path('services/<slug:slug>/public-requests/', PublicP2PRequestListView.as_view(), name='fundzi-service-public-p2p'),
     # ── Vendor Ecosystem (public) ─────────────────────────────────────────────
     path('vendors/', VendorListView.as_view(), name='fundzi-vendor-list'),
     path('vendors/<slug:slug>/', VendorDetailView.as_view(), name='fundzi-vendor-detail'),
