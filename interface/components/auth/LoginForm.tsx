@@ -14,7 +14,7 @@ export function LoginForm() {
   const [error, setError] = useState("");
   const [isLoading, setLoading] = useState(false);
 
-  async function onSubmit(event: React.FormEvent) {
+  async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setLoading(true);
@@ -29,34 +29,30 @@ export function LoginForm() {
   }
 
   return (
-    <div className="grid gap-6">
-      <div className="grid gap-1.5">
-        <h1 className="text-2xl font-extrabold tracking-tight">ورود به فاندزی</h1>
-        <p className="text-sm text-muted-foreground">شماره موبایل خود را وارد کنید تا کد ورود ارسال شود.</p>
-      </div>
-      <form className="grid gap-4" onSubmit={onSubmit}>
-        <div className="grid gap-2">
-          <Label htmlFor="phone">شماره موبایل</Label>
-          <div className="relative">
-            <Phone className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              id="phone"
-              value={phone}
-              onChange={(event) => setPhone(event.target.value)}
-              placeholder="09120000000"
-              required
-              dir="ltr"
-              className="pr-10 text-left"
-            />
-          </div>
+    <form className="grid gap-4" onSubmit={onSubmit}>
+      <div className="grid gap-2">
+        <Label htmlFor="phone">شماره موبایل</Label>
+        <div className="relative">
+          <Phone className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            id="phone"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="09120000000"
+            required
+            dir="ltr"
+            className="pr-10 text-left"
+          />
         </div>
-        {error ? (
-          <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">{error}</p>
-        ) : null}
-        <Button type="submit" size="lg" disabled={isLoading || !phone}>
-          {isLoading ? "در حال ارسال..." : "دریافت کد ورود"}
-        </Button>
-      </form>
-    </div>
+      </div>
+      {error ? (
+        <p className="rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2.5 text-sm font-medium text-destructive">
+          {error}
+        </p>
+      ) : null}
+      <Button type="submit" size="lg" disabled={isLoading || !phone}>
+        {isLoading ? "در حال ارسال..." : "دریافت کد ورود"}
+      </Button>
+    </form>
   );
 }

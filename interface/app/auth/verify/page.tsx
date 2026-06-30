@@ -4,7 +4,7 @@ import { OtpVerifyForm } from "@/components/auth/OtpVerifyForm";
 
 export default function VerifyPage() {
   return (
-    <AuthShell>
+    <AuthShell formTitle="تأیید کد ورود" formSubtitle="کد ارسال‌شده را وارد کنید">
       <Suspense fallback={<div className="text-muted-foreground">در حال بارگذاری...</div>}>
         <OtpVerifyForm />
       </Suspense>
