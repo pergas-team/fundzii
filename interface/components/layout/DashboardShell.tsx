@@ -1,3 +1,4 @@
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "./AppSidebar";
 
 export function DashboardShell({
@@ -16,24 +17,35 @@ export function DashboardShell({
   const hasHeader = Boolean(title);
 
   return (
-    <main className="container py-6 lg:py-8">
-      <div className="grid gap-6 lg:grid-cols-[256px_1fr]">
-        <div className="hidden lg:block lg:min-w-0 lg:self-start">
-          <AppSidebar mode={mode} className="sticky top-20" />
-        </div>
-        <section className="min-w-0">
+    <SidebarProvider>
+      <AppSidebar mode={mode} />
+      <SidebarInset>
+        <div className="container py-6 lg:py-8">
+          {/* Mobile sidebar trigger — always visible on small screens */}
+          {!hasHeader && (
+            <div className="mb-4 flex items-center lg:hidden">
+              <SidebarTrigger />
+            </div>
+          )}
           {hasHeader && (
             <div className="mb-6 flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-end sm:justify-between">
-              <div>
-                <h1 className="text-2xl font-extrabold tracking-tight">{title}</h1>
-                {description ? <p className="mt-1.5 text-sm text-muted-foreground">{description}</p> : null}
+              <div className="flex items-center gap-3">
+                <SidebarTrigger className="lg:hidden" />
+                <div>
+                  <h1 className="text-2xl font-extrabold tracking-tight">{title}</h1>
+                  {description ? (
+                    <p className="mt-1.5 text-sm text-muted-foreground">{description}</p>
+                  ) : null}
+                </div>
               </div>
-              {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+              {actions ? (
+                <div className="flex flex-wrap items-center gap-2">{actions}</div>
+              ) : null}
             </div>
           )}
           <div className="animate-fade-in">{children}</div>
-        </section>
-      </div>
-    </main>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
