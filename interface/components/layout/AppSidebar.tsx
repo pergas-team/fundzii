@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ComponentType } from "react";
-import { BriefcaseBusiness, ClipboardList, Gauge, Landmark, ShieldCheck, UsersRound } from "lucide-react";
+import { BarChart2, BriefcaseBusiness, ClipboardList, FileStack, Gauge, Landmark, ShieldCheck, UsersRound } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -28,6 +28,8 @@ const adminItems: Item[] = [
   { href: "/admin/services", label: "خدمات", icon: Landmark },
   { href: "/admin/users", label: "کاربران", icon: UsersRound },
   { href: "/admin/vendors", label: "وندورها", icon: BriefcaseBusiness },
+  { href: "/admin/vendor-applications", label: "درخواست‌های وندور", icon: FileStack },
+  { href: "/admin/reports", label: "گزارش‌ها", icon: BarChart2 },
 ];
 
 const userItems: Item[] = [

@@ -1,5 +1,14 @@
 import { apiFetch, toQuery } from "./client";
-import type { AdminRequestFilters, AdminStats, PaginatedResponse } from "@/types/admin";
+import type {
+  AdminRequestFilters,
+  AdminStats,
+  PaginatedResponse,
+  ReportFunnelItem,
+  ReportMonthly,
+  ReportPartnerPerformance,
+  VendorApplication,
+  VendorApplicationFilters,
+} from "@/types/admin";
 import type { FinancingRequest, InternalNote, RequestAttachment } from "@/types/request";
 
 export async function listAdminRequests(filters: AdminRequestFilters = {}) {
@@ -54,4 +63,34 @@ export async function deleteAdminAttachment(id: string | number, attachmentId: s
   return apiFetch<{ detail: string }>(`/api/fundzi/admin/requests/${id}/attachments/${attachmentId}/`, {
     method: "DELETE",
   });
+}
+
+export async function listAdminVendorApplications(filters: VendorApplicationFilters = {}) {
+  return apiFetch<PaginatedResponse<VendorApplication>>(`/api/fundzi/admin/vendor-applications/${toQuery(filters)}`);
+}
+
+export async function updateAdminVendorApplication(
+  id: number,
+  data: Partial<Pick<VendorApplication, "status" | "vendor_notes">>
+) {
+  return apiFetch<VendorApplication>(`/api/fundzi/admin/vendor-applications/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getAdminReportFunnel() {
+  return apiFetch<{ results: ReportFunnelItem[] }>("/api/fundzi/admin/reports/funnel/");
+}
+
+export async function getAdminReportPartnerPerformance() {
+  return apiFetch<{ results: ReportPartnerPerformance[] }>("/api/fundzi/admin/reports/partner-performance/");
+}
+
+export async function getAdminReportMonthly() {
+  return apiFetch<{ results: ReportMonthly[] }>("/api/fundzi/admin/reports/monthly/");
+}
+
+export function getAdminReportCsvUrl(report: "funnel" | "partner-performance" | "monthly") {
+  return `/api/fundzi/admin/reports/${report}/?export=csv`;
 }
