@@ -76,6 +76,7 @@ class ServiceContentSerializer(serializers.ModelSerializer):
 
 class FormFieldSerializer(serializers.ModelSerializer):
     type = serializers.CharField(source='field_type', read_only=True)
+    parent = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = FormField
@@ -83,6 +84,7 @@ class FormFieldSerializer(serializers.ModelSerializer):
             'id', 'label', 'key', 'type', 'field_type',
             'required', 'placeholder', 'help_text',
             'options', 'validation_config', 'order', 'is_active',
+            'parent', 'group_option',
         ]
         extra_kwargs = {'field_type': {'write_only': True}}
 

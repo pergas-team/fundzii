@@ -47,6 +47,13 @@ PRIVATE_INVESTMENT_FIELDS = [
     ('investment_sector',       'حوزه مورد علاقه برای سرمایه‌گذاری',          'multi_select', False, ['صنعت و تولید', 'مسکن و ساختمان', 'تجارت و بازرگانی', 'فناوری', 'خدمات', 'کشاورزی', 'سایر']),
     # ── تضامین مورد نیاز ──────────────────────────────────────────────────────
     ('required_collateral_types', 'نوع تضامین مورد نیاز',                     'multi_select', True,  ['سند ملکی', 'طلا و جواهر', 'سهام بورسی', 'ضامن معتبر', 'سفته', 'چک', 'سایر']),
+    # دو نمونه از گروه‌بندی شرطی روی همین فیلد چندانتخابی: سرمایه‌گذار می‌تواند
+    # هم‌زمان چند نوع تضمین را بپذیرد (مثلاً هم ملک و هم طلا) و برای هرکدام
+    # فیلدهای اختصاصی خودشان را جداگانه تکمیل کند.
+    ('collateral_req_property_region', 'منطقه قابل قبول ملک', 'select', True, ['تهران', 'کلانشهرها', 'سراسر کشور'], 'required_collateral_types', 'سند ملکی'),
+    ('collateral_req_property_min_value_ratio', 'حداقل نسبت ارزش ملک به سرمایه (درصد)', 'percentage', True, [], 'required_collateral_types', 'سند ملکی'),
+    ('collateral_req_gold_type', 'نوع طلای قابل قبول', 'select', True, ['آب‌شده', 'سکه', 'شمش', 'مصنوعات'], 'required_collateral_types', 'طلا و جواهر'),
+    ('collateral_req_gold_min_weight_grams', 'حداقل وزن طلای قابل قبول (گرم)', 'number', True, [], 'required_collateral_types', 'طلا و جواهر'),
     ('min_collateral_ratio',    'حداقل نسبت پوشش تضمین به سرمایه (درصد)',     'percentage',   True,  []),
     ('collateral_notes',        'توضیحات تضامین',                              'textarea',     False, []),
     # ── ریسک و شرایط قرارداد ──────────────────────────────────────────────────
@@ -71,6 +78,12 @@ PRIVATE_FINANCING_FIELDS = [
     ('financing_purpose_description', 'شرح کامل هدف',                         'textarea',     True,  []),
     # ── تضامین قابل ارائه ─────────────────────────────────────────────────────
     ('offered_collateral_types', 'نوع تضامین قابل ارائه',                     'multi_select', True,  ['سند ملکی', 'طلا و جواهر', 'سهام بورسی', 'ضامن معتبر', 'سفته', 'چک', 'سایر']),
+    # هر گزینه از تضامین بالا می‌تواند گروه فیلدهای اختصاصی خودش را فعال کند.
+    # کاربر می‌تواند هم‌زمان چند تضمین (مثلاً هم ملک و هم طلا) انتخاب کند و فیلدهای هر گروه را جداگانه تکمیل کند.
+    ('collateral_property_district', 'منطقه ملک', 'select', True, ['1', '2', '3'], 'offered_collateral_types', 'سند ملکی'),
+    ('collateral_property_area_sqm', 'متراژ ملک (متر مربع)', 'number', True, [], 'offered_collateral_types', 'سند ملکی'),
+    ('collateral_gold_type', 'نوع طلا', 'select', True, ['آب‌شده', 'سکه', 'شمش', 'مصنوعات'], 'offered_collateral_types', 'طلا و جواهر'),
+    ('collateral_gold_weight_grams', 'وزن طلا (گرم)', 'number', True, [], 'offered_collateral_types', 'طلا و جواهر'),
     ('collateral_description',  'شرح تضامین',                                  'textarea',     True,  []),
     ('collateral_estimated_value', 'ارزش تخمینی تضامین (تومان)',               'money',        True,  []),
     ('collateral_documents',    'مدارک تضامین (عکس / اسکن)',                   'file',         False, []),
@@ -531,7 +544,13 @@ class Command(BaseCommand):
             service=service,
             defaults={'title': f'فرم {title}', 'description': short_description, 'is_active': True},
         )
-        for index, (key, label, field_type, required, options) in enumerate(fields, start=1):
+        for index, field_def in enumerate(fields, start=1):
+            key, label, field_type, required, options = field_def[:5]
+            parent_key = field_def[5] if len(field_def) > 5 else None
+            group_option = field_def[6] if len(field_def) > 6 else ''
+            # Parent rows must precede their children in the `fields` list —
+            # each field def is applied in order, so the parent already exists by then.
+            parent = FormField.objects.filter(form=form, key=parent_key).first() if parent_key else None
             FormField.objects.update_or_create(
                 form=form,
                 key=key,
@@ -542,6 +561,8 @@ class Command(BaseCommand):
                     'options': options,
                     'order': index,
                     'is_active': True,
+                    'parent': parent,
+                    'group_option': group_option if parent else '',
                 },
             )
         workflow, _ = Workflow.objects.update_or_create(

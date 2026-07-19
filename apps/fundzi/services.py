@@ -24,6 +24,28 @@ def field_value(payload, key):
     return payload.get(key)
 
 
+def selected_option_values(payload, field):
+    """Selected value(s) of a select/multi_select field, normalized to strings."""
+    value = payload.get(field.key)
+    if value in (None, '', []):
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [str(normalize_option(item)) for item in values]
+
+
+def field_group_active(field, payload):
+    """A child field only counts when its parent has its ``group_option`` selected.
+
+    Top-level fields are always active. Children of an inactive parent are never active.
+    """
+    parent = field.parent
+    if parent is None:
+        return True
+    if not parent.is_active:
+        return False
+    return str(field.group_option) in selected_option_values(payload, parent)
+
+
 def validate_required_fields(service, payload, files=None):
     files = files or {}
     missing = {}
@@ -31,7 +53,9 @@ def validate_required_fields(service, payload, files=None):
     if not form:
         raise ValidationError({'form': 'برای این سرویس فرم فعال تعریف نشده است.'})
 
-    for field in form.fields.filter(is_active=True, required=True):
+    for field in form.fields.filter(is_active=True, required=True).select_related('parent'):
+        if not field_group_active(field, payload):
+            continue
         value = payload.get(field.key)
         has_file = field.key in files
         if field.field_type == 'file':
@@ -45,7 +69,10 @@ def validate_required_fields(service, payload, files=None):
 
 def validate_select_fields(service, payload):
     errors = {}
-    for field in service.form.fields.filter(is_active=True, field_type__in=['select', 'multi_select']):
+    fields = service.form.fields.filter(is_active=True, field_type__in=['select', 'multi_select'])
+    for field in fields.select_related('parent'):
+        if not field_group_active(field, payload):
+            continue
         value = payload.get(field.key)
         if value in (None, ''):
             continue
@@ -118,9 +145,11 @@ def validate_field_constraints(service, payload):
     form = getattr(service, 'form', None)
     if not form:
         return
-    for field in form.fields.filter(is_active=True):
+    for field in form.fields.filter(is_active=True).select_related('parent'):
         rules = field.validation_config or {}
         if not rules:
+            continue
+        if not field_group_active(field, payload):
             continue
         value = payload.get(field.key)
         if value in (None, '', []):
@@ -211,8 +240,10 @@ def create_financing_request(service, user, payload, files=None):
         note='ثبت درخواست',
     )
 
-    fields = FormField.objects.filter(form=service.form, is_active=True)
+    fields = FormField.objects.filter(form=service.form, is_active=True).select_related('parent')
     for field in fields:
+        if not field_group_active(field, payload):
+            continue
         file_obj = files.get(field.key)
         raw_value = payload.get(field.key)
         value_data = serialize_value(field, raw_value, file_obj)

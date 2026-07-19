@@ -24,8 +24,17 @@ class ServiceContentInline(admin.TabularInline):
 
 class FormFieldInline(admin.TabularInline):
     model = FormField
+    fk_name = 'form'
     extra = 0
-    fields = ('label', 'key', 'field_type', 'required', 'options', 'validation_config', 'order', 'is_active')
+    fields = ('label', 'key', 'field_type', 'required', 'options', 'validation_config', 'order', 'is_active', 'parent', 'group_option')
+
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        parent_field = formset.form.base_fields.get('parent')
+        if parent_field is not None:
+            qs = FormField.objects.filter(form=obj) if obj else FormField.objects.none()
+            parent_field.queryset = qs.filter(field_type__in=['select', 'multi_select'], parent__isnull=True)
+        return formset
 
 
 class WorkflowStepInline(admin.TabularInline):

@@ -60,7 +60,7 @@ from apps.fundzi.models import (
     WorkflowStep,
     decimal_from_payload,
 )
-from apps.fundzi.services import create_financing_request
+from apps.fundzi.services import create_financing_request, normalize_option
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -707,6 +707,40 @@ class AdminServiceFormView(APIView):
         return Response(AdminServiceSerializer().to_representation(service))
 
 
+def _apply_field_group(field, data):
+    """Set ``parent``/``group_option`` (conditional group) from admin payload."""
+    if 'parent' not in data and 'group_option' not in data:
+        return
+    parent_id = data.get('parent') if 'parent' in data else field.parent_id
+    if parent_id in (None, '', 0, '0'):
+        field.parent = None
+        field.group_option = ''
+        return
+
+    parent = FormField.objects.filter(pk=parent_id, form=field.form).first()
+    if not parent:
+        raise ValidationError({'parent': 'فیلد والد یافت نشد یا متعلق به این فرم نیست.'})
+    if field.pk and parent.pk == field.pk:
+        raise ValidationError({'parent': 'فیلد نمی‌تواند والد خودش باشد.'})
+    if parent.field_type not in ('select', 'multi_select'):
+        raise ValidationError({'parent': 'فیلد والد باید از نوع انتخاب تکی یا چندتایی باشد.'})
+    if parent.parent_id:
+        raise ValidationError({'parent': 'گروه‌بندی تو در تو پشتیبانی نمی‌شود.'})
+    if field.pk and field.children.exists():
+        raise ValidationError({'parent': 'فیلدی که خودش والد گروه است نمی‌تواند زیرمجموعه فیلد دیگری شود.'})
+
+    group_option = data.get('group_option') if 'group_option' in data else field.group_option
+    group_option = '' if group_option is None else str(group_option)
+    if not group_option:
+        raise ValidationError({'group_option': 'گزینه فعال‌کننده گروه را انتخاب کنید.'})
+    allowed = [str(normalize_option(option)) for option in (parent.options or [])]
+    if group_option not in allowed:
+        raise ValidationError({'group_option': 'گزینه انتخاب‌شده در فیلد والد وجود ندارد.'})
+
+    field.parent = parent
+    field.group_option = group_option
+
+
 def _field_from_data(field, data, form=None, partial=False):
     if form:
         field.form = form
@@ -730,6 +764,15 @@ def _field_from_data(field, data, form=None, partial=False):
         field.options = parse_json_value(data.get('options'), [])
     if 'validation_config' in data:
         field.validation_config = parse_json_value(data.get('validation_config'), {})
+    _apply_field_group(field, data)
+    if field.pk and field.children.exists():
+        if field.field_type not in ('select', 'multi_select'):
+            raise ValidationError({'field_type': 'این فیلد والد یک گروه است و باید از نوع انتخابی بماند.'})
+        allowed = [str(normalize_option(option)) for option in (field.options or [])]
+        orphaned = field.children.exclude(group_option__in=allowed)
+        if orphaned.exists():
+            labels = '، '.join(orphaned.values_list('label', flat=True))
+            raise ValidationError({'options': f'این گزینه‌ها توسط فیلدهای زیرمجموعه استفاده می‌شوند: {labels}'})
     try:
         field.full_clean()
     except DjangoValidationError as exc:

@@ -291,6 +291,284 @@ class FundziAPITests(TestCase):
         self.assertEqual(dashboard_response.status_code, 200)
 
 
+class ConditionalFieldGroupTests(TestCase):
+    """The offered_collateral_types multi_select field on the private-financing
+    service has two conditional groups seeded (property district/area under
+    'سند ملکی' and gold type/weight under 'طلا و جواهر'). Users may pick more
+    than one collateral type at once and each selected group's fields become
+    required independently."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_fundzi')
+        cls.user = User.objects.create_user(username='09120000000', password='pass')
+        cls.admin = User.objects.create_user(username='admin', password='pass', is_staff=True)
+        cls.service = FinancialService.objects.get(slug='private-financing')
+
+    def base_payload(self, **overrides):
+        payload = {
+            'full_name': 'علی محمدی',
+            'national_id': '1234567890',
+            'phone': '09120000000',
+            'requested_amount': '500000000',
+            'duration_months': 12,
+            'repayment_schedule': 'ماهانه',
+            'max_acceptable_rate': '20',
+            'financing_purpose': 'توسعه کسب‌وکار',
+            'financing_purpose_description': 'توسعه فروشگاه',
+            'collateral_description': 'ملک و طلا',
+            'collateral_estimated_value': '600000000',
+            'monthly_income': '50000000',
+            'employment_status': 'کارآفرین / صاحب کسب‌وکار',
+            'has_active_loans': False,
+            'credit_history': 'عالی — بدون چک برگشتی',
+            'preferred_contract_type': 'مشارکت',
+            'guarantor_available': True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_form_schema_exposes_group_metadata(self):
+        response = self.client.get(reverse('fundzi-service-form', args=['private-financing']))
+        fields = {item['key']: item for item in response.json()['fields']}
+
+        self.assertIsNone(fields['offered_collateral_types']['parent'])
+        self.assertEqual(fields['collateral_property_district']['parent'], fields['offered_collateral_types']['id'])
+        self.assertEqual(fields['collateral_property_district']['group_option'], 'سند ملکی')
+        self.assertEqual(fields['collateral_gold_type']['group_option'], 'طلا و جواهر')
+
+    def test_single_collateral_group_requires_only_its_own_fields(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-financing']),
+            data=json.dumps(self.base_payload(
+                offered_collateral_types=['سند ملکی'],
+                collateral_property_district='2',
+                collateral_property_area_sqm='90',
+            )),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        request = FinancingRequest.objects.get(id=response.json()['id'])
+        stored_keys = set(request.field_values.values_list('field__key', flat=True))
+        self.assertIn('collateral_property_district', stored_keys)
+        self.assertNotIn('collateral_gold_type', stored_keys)
+        self.assertNotIn('collateral_gold_weight_grams', stored_keys)
+
+    def test_multiple_collateral_groups_can_be_active_together(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-financing']),
+            data=json.dumps(self.base_payload(
+                offered_collateral_types=['سند ملکی', 'طلا و جواهر'],
+                collateral_property_district='2',
+                collateral_property_area_sqm='90',
+                collateral_gold_type='سکه',
+                collateral_gold_weight_grams='30',
+            )),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        request = FinancingRequest.objects.get(id=response.json()['id'])
+        stored_keys = set(request.field_values.values_list('field__key', flat=True))
+        self.assertIn('collateral_property_district', stored_keys)
+        self.assertIn('collateral_gold_type', stored_keys)
+        self.assertIn('collateral_gold_weight_grams', stored_keys)
+
+    def test_missing_field_in_active_group_is_rejected(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-financing']),
+            data=json.dumps(self.base_payload(
+                offered_collateral_types=['طلا و جواهر'],
+                collateral_gold_type='سکه',
+                # gold weight intentionally omitted
+            )),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('collateral_gold_weight_grams', response.json().get('errors', response.json()))
+
+    def test_inactive_group_fields_are_not_required(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-financing']),
+            data=json.dumps(self.base_payload(offered_collateral_types=['ضامن معتبر'])),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+
+    def test_admin_can_create_field_inside_existing_group(self):
+        self.client.login(username='admin', password='pass')
+        parent = self.service.form.fields.get(key='offered_collateral_types')
+
+        response = self.client.post(
+            reverse('fundzi-admin-service-field-list', args=[self.service.id]),
+            data=json.dumps({
+                'label': 'شماره سند سهام',
+                'key': 'collateral_share_document_number',
+                'type': 'text',
+                'required': True,
+                'order': 20,
+                'parent': parent.id,
+                'group_option': 'سهام بورسی',
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        created = parent.children.get(key='collateral_share_document_number')
+        self.assertEqual(created.group_option, 'سهام بورسی')
+
+    def test_admin_rejects_group_option_not_in_parent_options(self):
+        self.client.login(username='admin', password='pass')
+        parent = self.service.form.fields.get(key='offered_collateral_types')
+
+        response = self.client.post(
+            reverse('fundzi-admin-service-field-list', args=[self.service.id]),
+            data=json.dumps({
+                'label': 'فیلد نامعتبر',
+                'key': 'invalid_group_field',
+                'type': 'text',
+                'order': 21,
+                'parent': parent.id,
+                'group_option': 'گزینه ناموجود',
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_admin_rejects_non_select_parent(self):
+        self.client.login(username='admin', password='pass')
+        text_field = self.service.form.fields.get(key='financing_purpose_description')
+
+        response = self.client.post(
+            reverse('fundzi-admin-service-field-list', args=[self.service.id]),
+            data=json.dumps({
+                'label': 'فیلد نامعتبر',
+                'key': 'invalid_parent_field',
+                'type': 'text',
+                'order': 22,
+                'parent': text_field.id,
+                'group_option': 'x',
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+
+class PrivateInvestmentCollateralGroupTests(TestCase):
+    """Second, independent demonstration of conditional field groups: the
+    required_collateral_types multi_select field on the private-investment
+    service has two groups seeded (property region/ratio under 'سند ملکی' and
+    gold type/weight under 'طلا و جواهر'), mirroring the private-financing
+    example but on a different service/field to prove the feature generalizes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command('seed_fundzi')
+        cls.user = User.objects.create_user(username='09120000000', password='pass')
+        cls.service = FinancialService.objects.get(slug='private-investment')
+
+    def base_payload(self, **overrides):
+        payload = {
+            'full_name': 'سارا احمدی',
+            'national_id': '0987654321',
+            'phone': '09120000000',
+            'investment_amount': '1000000000',
+            'payment_schedule': 'یکجا',
+            'duration_months': 12,
+            'min_return_rate': '18',
+            'max_return_rate': '25',
+            'return_payment_type': 'ماهانه',
+            'min_collateral_ratio': '120',
+            'risk_tolerance': 'ریسک متوسط',
+            'contract_type': 'مشارکت',
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_form_schema_exposes_group_metadata(self):
+        response = self.client.get(reverse('fundzi-service-form', args=['private-investment']))
+        fields = {item['key']: item for item in response.json()['fields']}
+
+        self.assertIsNone(fields['required_collateral_types']['parent'])
+        self.assertEqual(fields['collateral_req_property_region']['parent'], fields['required_collateral_types']['id'])
+        self.assertEqual(fields['collateral_req_property_region']['group_option'], 'سند ملکی')
+        self.assertEqual(fields['collateral_req_gold_type']['group_option'], 'طلا و جواهر')
+
+    def test_single_group_requires_only_its_own_fields(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-investment']),
+            data=json.dumps(self.base_payload(
+                required_collateral_types=['سند ملکی'],
+                collateral_req_property_region='تهران',
+                collateral_req_property_min_value_ratio='150',
+            )),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        request = FinancingRequest.objects.get(id=response.json()['id'])
+        stored_keys = set(request.field_values.values_list('field__key', flat=True))
+        self.assertIn('collateral_req_property_region', stored_keys)
+        self.assertNotIn('collateral_req_gold_type', stored_keys)
+        self.assertNotIn('collateral_req_gold_min_weight_grams', stored_keys)
+
+    def test_both_groups_can_be_active_together(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-investment']),
+            data=json.dumps(self.base_payload(
+                required_collateral_types=['سند ملکی', 'طلا و جواهر'],
+                collateral_req_property_region='تهران',
+                collateral_req_property_min_value_ratio='150',
+                collateral_req_gold_type='سکه',
+                collateral_req_gold_min_weight_grams='40',
+            )),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        request = FinancingRequest.objects.get(id=response.json()['id'])
+        stored_keys = set(request.field_values.values_list('field__key', flat=True))
+        self.assertIn('collateral_req_property_region', stored_keys)
+        self.assertIn('collateral_req_gold_type', stored_keys)
+        self.assertIn('collateral_req_gold_min_weight_grams', stored_keys)
+
+    def test_missing_field_in_active_group_is_rejected(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-investment']),
+            data=json.dumps(self.base_payload(
+                required_collateral_types=['طلا و جواهر'],
+                collateral_req_gold_type='سکه',
+                # min weight intentionally omitted
+            )),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('collateral_req_gold_min_weight_grams', response.json().get('errors', response.json()))
+
+    def test_neither_group_active_when_other_collateral_selected(self):
+        self.client.login(username='09120000000', password='pass')
+        response = self.client.post(
+            reverse('fundzi-service-request-create', args=['private-investment']),
+            data=json.dumps(self.base_payload(required_collateral_types=['ضامن معتبر'])),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+
+
 class FundziNotificationTests(TestCase):
     @classmethod
     def setUpTestData(cls):

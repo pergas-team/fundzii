@@ -46,6 +46,10 @@ export type AdminDynamicFormField = {
   validation_config?: Record<string, unknown>;
   order: number;
   is_active?: boolean;
+  /** id of the field whose selected option must include `group_option` for this field to apply. */
+  parent?: number | null;
+  /** the option value on the parent field that activates this field (conditional group). */
+  group_option?: string;
 };
 
 export type AdminDynamicForm = {

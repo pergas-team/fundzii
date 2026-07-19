@@ -25,6 +25,10 @@ export type DynamicFormField = {
   default_value?: unknown;
   disabled?: boolean;
   hidden?: boolean;
+  /** id of the field whose selected option must include `group_option` for this field to apply. */
+  parent?: number | null;
+  /** the option value on the parent field that activates this field (conditional group). */
+  group_option?: string;
 };
 
 export type DynamicFormSchema = {

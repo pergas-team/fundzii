@@ -123,6 +123,17 @@ class FormField(models.Model):
     validation_config = models.JSONField(default=dict, blank=True)
     order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    # Conditional group: this field is only shown/validated when the parent
+    # (a select/multi_select field of the same form) has `group_option` selected.
+    parent = models.ForeignKey(
+        'self',
+        related_name='children',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        verbose_name='فیلد والد (گروه)',
+    )
+    group_option = models.CharField(max_length=255, blank=True, verbose_name='گزینه فعال‌کننده گروه')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

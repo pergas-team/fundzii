@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ApiError } from "@/lib/api/client";
 import { submitServiceRequest } from "@/lib/api/requests";
-import { hasFileFields } from "@/lib/utils/formSchema";
+import { fieldsById, hasFileFields, isFieldGroupActive } from "@/lib/utils/formSchema";
 import { DynamicField } from "./DynamicField";
 import type { DynamicFormSchema } from "@/types/form";
 
@@ -25,10 +25,16 @@ function normalizeErrors(error: unknown) {
 export function DynamicFormRenderer({ slug, schema }: { slug: string; schema: DynamicFormSchema }) {
   const router = useRouter();
   const sortedFields = useMemo(() => [...schema.fields].sort((a, b) => a.order - b.order), [schema.fields]);
-  const { register, handleSubmit, setValue, watch, formState } = useForm<FormValues>();
+  const fieldsMap = useMemo(() => fieldsById(schema.fields), [schema.fields]);
+  // shouldUnregister: true drops a hidden field's value + validation rules on
+  // unmount — required conditional-group fields must not block submission
+  // once their group is deselected.
+  const { register, handleSubmit, setValue, watch, formState } = useForm<FormValues>({ shouldUnregister: true });
   const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
   const [trackingCode, setTrackingCode] = useState("");
   const [isSubmitting, setSubmitting] = useState(false);
+  const liveValues = watch();
+  const visibleFields = sortedFields.filter((field) => isFieldGroupActive(field, liveValues, fieldsMap));
 
   async function onSubmit(values: FormValues, event?: React.BaseSyntheticEvent) {
     setServerErrors({});
@@ -36,10 +42,11 @@ export function DynamicFormRenderer({ slug, schema }: { slug: string; schema: Dy
     setSubmitting(true);
     try {
       const formElement = event?.target as HTMLFormElement | undefined;
-      const hasFiles = hasFileFields(sortedFields);
+      const activeFields = sortedFields.filter((field) => isFieldGroupActive(field, values, fieldsMap));
+      const hasFiles = hasFileFields(activeFields);
       const payload = hasFiles && formElement ? new FormData(formElement) : values;
       if (payload instanceof FormData) {
-        sortedFields.forEach((field) => {
+        activeFields.forEach((field) => {
           if (field.type === "boolean") payload.set(field.key, values[field.key] ? "true" : "false");
         });
       }
@@ -60,15 +67,16 @@ export function DynamicFormRenderer({ slug, schema }: { slug: string; schema: Dy
       </CardHeader>
       <CardContent>
         <form className="grid gap-5" onSubmit={handleSubmit(onSubmit)}>
-          {sortedFields.map((field) => (
-            <DynamicField
-              key={field.id}
-              field={field}
-              register={register}
-              setValue={setValue}
-              watch={watch}
-              error={(formState.errors[field.key]?.message as string | undefined) || serverErrors[field.key]}
-            />
+          {visibleFields.map((field) => (
+            <div key={field.id} className={field.parent ? "border-r-2 border-primary/20 pr-4" : undefined}>
+              <DynamicField
+                field={field}
+                register={register}
+                setValue={setValue}
+                watch={watch}
+                error={(formState.errors[field.key]?.message as string | undefined) || serverErrors[field.key]}
+              />
+            </div>
           ))}
           {serverErrors.__all__ ? (
             <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">{serverErrors.__all__}</p>

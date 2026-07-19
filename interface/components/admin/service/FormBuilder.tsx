@@ -46,6 +46,8 @@ type FieldDraft = {
   order: number;
   options: OptionPair[];
   validation_config: Record<string, unknown>;
+  parent: number | null;
+  group_option: string;
 };
 
 function toDraft(field?: AdminDynamicFormField, order = 0): FieldDraft {
@@ -61,7 +63,19 @@ function toDraft(field?: AdminDynamicFormField, order = 0): FieldDraft {
     order: field?.order ?? order,
     options: toOptionPairs(field?.options),
     validation_config: (field?.validation_config as Record<string, unknown>) ?? {},
+    parent: field?.parent ?? null,
+    group_option: field?.group_option ?? "",
   };
+}
+
+/** Fields that can host a conditional group: top-level select/multi_select fields, excluding the field being edited. */
+function eligibleParents(fields: AdminDynamicFormField[], excludeId?: number): AdminDynamicFormField[] {
+  return fields.filter(
+    (field) =>
+      field.id !== excludeId &&
+      !field.parent &&
+      ["select", "multi_select"].includes(field.field_type || field.type),
+  );
 }
 
 export function FormBuilder({
@@ -104,6 +118,8 @@ export function FormBuilder({
       order: draft.order,
       options: meta.hasOptions ? fromOptionPairs(draft.options) : [],
       validation_config: draft.validation_config,
+      parent: draft.parent,
+      group_option: draft.parent ? draft.group_option : "",
     };
     try {
       const saved = draft.id
@@ -154,18 +170,21 @@ export function FormBuilder({
           </p>
         ) : null}
 
-        {fields.map((field, index) =>
-          editingId === field.id ? (
+        {fields.map((field, index) => {
+          const parentField = field.parent ? fields.find((item) => item.id === field.parent) : undefined;
+          const childCount = fields.filter((item) => item.parent === field.id).length;
+          return editingId === field.id ? (
             <FieldEditor
               key={field.id}
               initial={toDraft(field)}
+              fields={fields}
               onSave={persist}
               onCancel={() => setEditingId(null)}
             />
           ) : (
             <div
               key={field.id}
-              className="flex items-center gap-3 rounded-xl border bg-card p-3.5 shadow-sm transition-colors hover:border-primary/30"
+              className={`flex items-center gap-3 rounded-xl border bg-card p-3.5 shadow-sm transition-colors hover:border-primary/30 ${parentField ? "mr-6 border-r-2 border-r-primary/30" : ""}`}
             >
               <div className="flex flex-col">
                 <button
@@ -194,6 +213,12 @@ export function FormBuilder({
                   <Badge variant="info">{fieldTypeLabel(field.field_type || field.type)}</Badge>
                   {field.required ? <Badge variant="warning">الزامی</Badge> : null}
                   {field.is_active === false ? <Badge variant="outline">غیرفعال</Badge> : null}
+                  {parentField ? (
+                    <Badge variant="outline">
+                      زیرمجموعه «{parentField.label}» = {field.group_option}
+                    </Badge>
+                  ) : null}
+                  {childCount > 0 ? <Badge variant="outline">{childCount} فیلد وابسته به این گروه</Badge> : null}
                 </div>
                 <p className="mt-1 truncate text-xs text-muted-foreground" dir="ltr">
                   {field.key}
@@ -209,12 +234,13 @@ export function FormBuilder({
                 </Button>
               </div>
             </div>
-          ),
-        )}
+          );
+        })}
 
         {editingId === "new" ? (
           <FieldEditor
             initial={toDraft(undefined, fields.length)}
+            fields={fields}
             onSave={persist}
             onCancel={() => setEditingId(null)}
           />
@@ -231,16 +257,22 @@ export function FormBuilder({
 
 function FieldEditor({
   initial,
+  fields,
   onSave,
   onCancel,
 }: {
   initial: FieldDraft;
+  fields: AdminDynamicFormField[];
   onSave: (draft: FieldDraft) => void;
   onCancel: () => void;
 }) {
   const [draft, setDraft] = useState<FieldDraft>(initial);
   const meta = fieldTypeMeta(draft.field_type);
   const set = (patch: Partial<FieldDraft>) => setDraft((current) => ({ ...current, ...patch }));
+  const parentCandidates = eligibleParents(fields, draft.id);
+  const parentField = parentCandidates.find((item) => item.id === draft.parent);
+  const parentOptions = toOptionPairs(parentField?.options);
+  const isGroupParent = fields.some((item) => item.parent === draft.id);
 
   return (
     <div className="grid gap-4 rounded-xl border-2 border-primary/20 bg-muted/20 p-4">
@@ -294,6 +326,47 @@ function FieldEditor({
         <Switch checked={draft.is_active} onCheckedChange={(value) => set({ is_active: value })} label="فعال" />
       </div>
 
+      <div className="grid gap-3 rounded-lg border bg-card p-3.5">
+        <Label>گروه‌بندی شرطی (اختیاری)</Label>
+        <p className="text-xs text-muted-foreground">
+          این فیلد را زیرمجموعه یک فیلد انتخابی دیگر کنید تا فقط وقتی گزینه مشخصی از آن انتخاب شد نمایش داده شود. مثلاً وقتی
+          کاربر «ملک» را از میان تضامین انتخاب می‌کند، فیلدهای مخصوص ملک ظاهر شوند.
+        </p>
+        {isGroupParent ? (
+          <p className="text-xs text-warning">
+            این فیلد خودش والدِ یک گروه است، پس نمی‌تواند زیرمجموعه فیلد دیگری شود.
+          </p>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="فیلد والد">
+              <Select
+                value={draft.parent ?? ""}
+                onChange={(event) => set({ parent: event.target.value ? Number(event.target.value) : null, group_option: "" })}
+              >
+                <option value="">بدون گروه (فیلد اصلی)</option>
+                {parentCandidates.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {draft.parent ? (
+              <Field label="گزینه فعال‌کننده گروه">
+                <Select value={draft.group_option} onChange={(event) => set({ group_option: event.target.value })}>
+                  <option value="">— انتخاب کنید —</option>
+                  {parentOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            ) : null}
+          </div>
+        )}
+      </div>
+
       {meta.hasOptions ? (
         <OptionsEditor options={draft.options} onChange={(options) => set({ options })} />
       ) : null}
@@ -305,7 +378,7 @@ function FieldEditor({
       />
 
       <div className="flex gap-2">
-        <Button onClick={() => onSave(draft)} disabled={!draft.label.trim()}>
+        <Button onClick={() => onSave(draft)} disabled={!draft.label.trim() || (Boolean(draft.parent) && !draft.group_option)}>
           <Save className="h-4 w-4" />
           ذخیره فیلد
         </Button>
