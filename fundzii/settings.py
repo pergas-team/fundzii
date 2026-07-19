@@ -96,6 +96,7 @@ USE_TZ = True
 
 # ── Static / media ───────────────────────────────────────────────────────────
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -110,15 +111,16 @@ FUNDZI_EMAIL_NOTIFICATIONS_ENABLED = os.environ.get('FUNDZI_EMAIL_NOTIFICATIONS_
 
 # ── Production security ───────────────────────────────────────────────────────
 if not DEBUG:
-    CSRF_COOKIE_SECURE = True
-    SESSION_COOKIE_SECURE = True
+    _https_enabled = os.environ.get('DJANGO_HTTPS_ENABLED', 'False').lower() == 'true'
+    CSRF_COOKIE_SECURE = _https_enabled
+    SESSION_COOKIE_SECURE = _https_enabled
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_BROWSER_XSS_FILTER = True
     X_FRAME_OPTIONS = 'DENY'
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
-    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000 if _https_enabled else 0
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = _https_enabled
+    SECURE_HSTS_PRELOAD = _https_enabled
+    SECURE_SSL_REDIRECT = _https_enabled
 
     _trusted = os.environ.get('CSRF_TRUSTED_ORIGINS', '')
     if _trusted:
