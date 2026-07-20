@@ -68,6 +68,9 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'fundzii.wsgi.application'
 
+# Nginx terminates TLS and forwards the original request scheme.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASES = {
     'default': {
